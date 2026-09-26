@@ -17,7 +17,7 @@
         "url": "https://github.com/brittytino/fossa/issues"
     },
     "scripts": {
-        "build": "pnpm clean && tsc && chmod +x dist/index.js",
+        "build": "pnpm clean && tsc && node -e \"try{require('fs').chmodSync('dist/index.js',0o755)}catch(e){}\"",
         "dev": "tsc --watch",
         "start": "node dist/index.js",
         "start:local": "FOSSA_API_URL=http://localhost:3001 node dist/index.js",
@@ -35,7 +35,7 @@
         "skills:validate": "node scripts/validate-skills.mjs",
         "skills:prompt": "node scripts/skills-to-prompt.mjs --format=xml",
         "skills:prompt:json": "node scripts/skills-to-prompt.mjs --format=json",
-        "clean": "rm -rf dist",
+        "clean": "node -e \"try{require('fs').rmSync('dist',{recursive:true,force:true})}catch(e){}\"",
         "prepublishOnly": "pnpm build"
     },
     "keywords": [

@@ -23,6 +23,7 @@
  * string contents change, and only when they actually contain the character.
  */
 const NUL = '\u0000';
+// eslint-disable-next-line no-control-regex
 const NUL_GLOBAL = /\u0000/g;
 
 /** Enough paths to see the shape of the source; not enough to flood a log line. */

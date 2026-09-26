@@ -121,6 +121,7 @@ describe('stripNulChars', () => {
         // and the element at index 2 moved to index 1. Payloads built from
         // filtered or pre-allocated lists carry holes, and a shifted index is
         // silent corruption of the data this function exists to preserve.
+        // eslint-disable-next-line no-sparse-arrays
         const sparse: unknown[] = ['a', , `c${NUL}`];
 
         const out = stripNulChars({ files: sparse }).files;

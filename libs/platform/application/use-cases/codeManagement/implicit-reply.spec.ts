@@ -175,6 +175,7 @@ describe('reply thread rendering', () => {
         ]);
         expect(user).toContain('shown');
         expect(user).not.toContain('h2');
+        // eslint-disable-next-line no-misleading-character-class
         expect(user).not.toMatch(/[⁦️]|\u{E0041}/u);
         expect(user.match(/<\/NEWEST MESSAGE>/g)).toHaveLength(1);
     });

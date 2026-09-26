@@ -30,7 +30,7 @@ export interface ParsedFossyRuleFile {
     examples: Array<{ snippet: string; isCorrect: boolean }>;
 }
 
-const FRONTMATTER_RE = /^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+const FRONTMATTER_RE = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
 const VALID_SEVERITIES = ['low', 'medium', 'high', 'critical'] as const;
 

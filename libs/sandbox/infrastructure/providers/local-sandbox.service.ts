@@ -450,34 +450,25 @@ export class LocalSandboxService implements ISandboxProvider {
                 }
                 // Use relative path with cwd so output paths are relative (consistent with grep)
                 // -not -type l excludes symlinks from results
-                try {
-                    const { stdout } = await execFileAsync(
-                        'find',
-                        [
-                            path,
-                            '-maxdepth',
-                            String(maxDepth),
-                            '-type',
-                            'f',
-                            '-not',
-                            '-type',
-                            'l',
-                        ],
-                        {
-                            cwd: repoDir,
-                            timeout: CMD_TIMEOUT_MS,
-                            maxBuffer: MAX_BUFFER,
-                        },
-                    );
-                    return stdout;
-                } catch (error: any) {
-                    // Absence was already answered above, by the ENOENT branch
-                    // of resolveSafePath. Reaching here means the path IS there
-                    // and `find` still failed — unreadable, timed out, buffer
-                    // exceeded. That is a broken lookup, and returning an empty
-                    // listing would let a caller read it as "not there".
-                    throw error;
-                }
+                const { stdout } = await execFileAsync(
+                    'find',
+                    [
+                        path,
+                        '-maxdepth',
+                        String(maxDepth),
+                        '-type',
+                        'f',
+                        '-not',
+                        '-type',
+                        'l',
+                    ],
+                    {
+                        cwd: repoDir,
+                        timeout: CMD_TIMEOUT_MS,
+                        maxBuffer: MAX_BUFFER,
+                    },
+                );
+                return stdout;
             },
 
             exec: async (

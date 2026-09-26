@@ -77,16 +77,13 @@ const makePrDoc = (prNumber: number) => ({
 
 const buildUseCase = () => {
     const findExecutions = jest.fn(async (params) => {
-        let rows = ALL_EXECUTIONS;
-
-        if (params.cursor) {
-            const at = ALL_EXECUTIONS.findIndex(
-                (e) => e.uuid === params.cursor.uuid,
-            );
-            rows = ALL_EXECUTIONS.slice(at + 1);
-        } else {
-            rows = ALL_EXECUTIONS.slice(params.skip ?? 0);
-        }
+        const rows = params.cursor
+            ? ALL_EXECUTIONS.slice(
+                  ALL_EXECUTIONS.findIndex(
+                      (e) => e.uuid === params.cursor.uuid,
+                  ) + 1,
+              )
+            : ALL_EXECUTIONS.slice(params.skip ?? 0);
 
         return {
             data: rows.slice(0, params.take ?? 30),

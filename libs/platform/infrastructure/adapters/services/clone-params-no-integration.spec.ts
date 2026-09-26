@@ -108,7 +108,7 @@ describe('getCloneParams with no integration connected', () => {
     it.each(adapters)(
         '$name does not invent a SaaS clone URL',
         async ({ build }) => {
-            let cloneParams: any = null;
+            let cloneParams: any;
 
             try {
                 cloneParams = await build().getCloneParams({
@@ -128,7 +128,7 @@ describe('getCloneParams with no integration connected', () => {
     it.each(adapters)(
         '$name never returns an empty auth token',
         async ({ build }) => {
-            let cloneParams: any = null;
+            let cloneParams: any;
 
             try {
                 cloneParams = await build().getCloneParams({

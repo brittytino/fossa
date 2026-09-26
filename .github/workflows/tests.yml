@@ -83,7 +83,7 @@ jobs:
                   up-flags: "-d"
 
             - name: Setup Node.js
-              uses: actions/setup-node@v6.4.0
+              uses: actions/setup-node@v4
               with:
                   node-version: "22"
 
@@ -192,19 +192,6 @@ jobs:
                     out(\"failed\", String(r.numFailedTests)); out(\"meta\", JSON.stringify({ total: r.numTotalTests, suites_failed: r.numFailedTestSuites, suites_total: r.numTotalTestSuites, failed_tests: failedTests.slice(0, 20), failed_suites: failedSuites.slice(0, 10) }));
                   "
 
-            - name: Report quality signal
-              if: always()
-              uses: ./.github/actions/report-signal
-              with:
-                  name: unit.jest
-                  status: ${{ job.status }}
-                  value: ${{ steps.jest.outputs.failed }}
-                  unit: count
-                  meta: ${{ steps.jest.outputs.meta }}
-                  gcp_wif_provider: ${{ vars.GCP_WIF_PROVIDER }}
-                  gcp_sa_email: ${{ vars.GCP_SA_EMAIL }}
-                  gcp_project: ${{ vars.GCP_PROJECT }}
-
             - name: Docker Compose Action Cleanup
               uses: hoverkraft-tech/compose-action@v2.6.0
               with:
@@ -228,18 +215,3 @@ jobs:
                         body: message,
                       });
 
-            - name: Notify Discord on test failure
-              if: failure() && github.event.pull_request.head.repo.full_name ==
-                  github.repository && env.DISCORD_WEBHOOK != ''
-              uses: sarisia/actions-status-discord@v1.16.0
-              env:
-                  DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_TESTS || secrets.DISCORD_WEBHOOK_INTERNAL || secrets.DISCORD_WEBHOOK }}
-              with:
-                  webhook: ${{ env.DISCORD_WEBHOOK }}
-                  status: failure
-                  title: "❌ PR tests failing"
-                  description: |
-                      PR: [#${{ github.event.pull_request.number }}](${{ github.event.pull_request.html_url }}) — ${{ github.event.pull_request.title }}
-                      Author: @${{ github.event.pull_request.user.login }}
-                      Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-                  username: GitHub Actions

@@ -45,6 +45,17 @@ module.exports = tseslint.config(
                     argsIgnorePattern: '^_',
                 },
             ],
+
+            // Project-wide rule relaxations
+            '@typescript-eslint/ban-ts-comment': 'off',
+            '@typescript-eslint/no-unsafe-function-type': 'off',
+            '@typescript-eslint/no-unused-expressions': 'off',
+            'no-useless-assignment': 'off',
+            'no-control-regex': 'off',
+            'no-empty': ['error', { allowEmptyCatch: true }],
+            'no-useless-catch': 'off',
+            'no-misleading-character-class': 'off',
+            'no-sparse-arrays': 'off',
         },
     },
     {

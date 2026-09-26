@@ -310,7 +310,6 @@ describe('row1 request assembly — the exact generateText invocation', () => {
             ...defaultResolved(),
             model: RESOLVED_MODEL,
         });
-        (mockResolve() as any).model; // no-op keep types happy
         await runAgentLoopCall(baseParams()); // no byokConfig
         const cacheArg = mockCache.mock.calls[0][0];
         expect(cacheArg.provider).toBeUndefined(); // slot?.provider
@@ -389,7 +388,7 @@ describe('row19 tool-call repair delegation (repairToolCall → repairInvalidToo
 
         await runAgentLoopCall({ ...baseParams(), signal });
 
-        const repairFn = genArgs().repairToolCall as Function;
+        const repairFn = genArgs().repairToolCall as (...args: any[]) => any;
         const toolCall = { toolName: 't1', input: 'not-json-args' };
         const inputSchema = jest.fn();
         const error = new Error('args failed schema');
@@ -408,7 +407,7 @@ describe('row19 tool-call repair delegation (repairToolCall → repairInvalidToo
     it('propagates the repair fail-soft result (null = SDK default "let the step fail")', async () => {
         mockRepair.mockResolvedValueOnce(null);
         await runAgentLoopCall(baseParams());
-        const repairFn = genArgs().repairToolCall as Function;
+        const repairFn = genArgs().repairToolCall as (...args: any[]) => any;
         await expect(
             repairFn({
                 toolCall: { toolName: 'x', input: 1 },

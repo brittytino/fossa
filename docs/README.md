@@ -43,7 +43,7 @@ the default branch.
   roots so existing links continue to work.
 - `_snippets/` — reusable MDX fragments imported via `<Snippet>` component
 - `_snippets/env-vars-generated.mdx` — **auto-generated** from
-  `fossa-ai/.env.schema`. Don't edit by hand. Run `pnpm run env:apply` to
+  `.env.schema`. Don't edit by hand. Run `pnpm run env:apply` to
   regenerate after schema changes.
 
 ## Internal engineering docs

@@ -6,9 +6,13 @@ description: "Compare your pull request against business rules or specs with @fo
 ## Overview
 
 Business Logic Validation lets you confirm that a pull request implements the expected behaviour described in a spec, document, or ticket. Fossy analyzes the PR diff, brings in the referenced business context, and flags mismatches before you merge.
-
-<img src="https://github.com/brittytino/fossa/wp-content/uploads/2025/10/business-logic.gif" alt="Example of using business logic validation" />
-
+```mermaid
+flowchart LR
+    A[Pull Request Diff] --> C{Fossy Review Engine}
+    B[Spec / Jira / Linear Ticket] --> C
+    C --> D[Compliance Validation]
+    D --> E[In-PR Suggestions & Feedback]
+```
 ## Prerequisites
 - If you want Fossy to **automatically fetch task context** from tools like Jira, Linear, Notion, or ClickUp, the corresponding plugin must be connected in your workspace's [Plugins](/en/how_to_use/code_review/plugins) page.
 - Any link you share (Jira, Slack, Google Docs, etc.) must be reachable through the plugins installed in your workspace.

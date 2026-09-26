@@ -1,0 +1,55 @@
+---
+title: "MCP Manager"
+description: "Implante o MCP Manager para o Fossa."
+icon: "puzzle-piece"
+tag: 'beta'
+---
+
+## O que são MCPs?
+
+Model Context Protocol (MCP) é um padrão aberto que permite que aplicativos de LLM se conectem a
+ferramentas externas e fontes de dados por meio de uma interface de servidor consistente. Os
+servidores MCP publicam esquemas de ferramentas e endpoints para que clientes como o Fossa/Fossy possam buscar
+contexto ou executar ações durante um fluxo de trabalho.
+
+## Arquitetura do MCP Manager
+
+O MCP Manager é o serviço de backend que intermediia essas conexões MCP para
+o Fossa. Ele rastreia provedores, integrações e ferramentas permitidas por
+workspace, e então expõe esse catálogo para a API do Fossa.
+
+- Registro central de provedores MCP (Fossa e custom)
+- Armazena metadados de integração (status de conexão, URL MCP, ferramentas permitidas)
+- Gerencia fluxos de autenticação específicos de cada provedor e descoberta de ferramentas
+- Expõe APIs usadas pelo Fossa para listar e invocar ferramentas MCP
+
+```mermaid
+graph TD
+    A[Fossa] --> B[MCP Manager]
+    B --> C[Providers]
+    C --> D[Fossa MCPs]
+    C --> F[Custom]
+```
+
+## Plugins no Fossa
+
+Tudo que está registrado no MCP Manager aparece na tela de **Plugins** do Fossa,
+para que sua equipe possa instalar, gerenciar e habilitar os MCPs disponíveis para cada
+workspace.
+
+<img src="/images/fossa_plugins.png" alt="Tela de plugins do Fossa mostrando MCPs do MCP Manager" />
+
+## Provedores
+
+### Provedor Fossa
+
+O provedor Fossa agrupa MCPs próprios gerenciados pelo Fossa, incluindo o
+Fossa MCP, Context7 MCP e Fossa Docs MCP.
+
+### Provedores Customizados
+
+Você pode adicionar provedores customizados para integrar sistemas internos ou plataformas
+de terceiros. Em implantações self-hosted, liste o provedor em
+`API_MCP_MANAGER_MCP_PROVIDERS`, e então implemente o provedor na base de código do MCP Manager.
+A implementação de referência está aqui:
+[fossa-mcp-manager repo](https://github.com/brittytino/fossa-mcp-manager#-adding-a-new-provider)

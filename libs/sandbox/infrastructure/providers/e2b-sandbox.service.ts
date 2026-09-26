@@ -1,0 +1,1129 @@
+import { createLogger, SimpleLogger } from '@libs/core/log/logger';
+import { PlatformType } from '@libs/core/domain/enums';
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { CommandExitError, Sandbox } from 'e2b';
+
+import {
+    CreateSandboxParams,
+    ISandboxProvider,
+    SandboxInstance,
+    SandboxRunResult,
+} from '@libs/sandbox/domain/contracts/sandbox.provider';
+import { RemoteCommands } from '@libs/code-review/infrastructure/adapters/services/collectCrossFileContexts.service';
+import { shSingleQuote } from '@libs/code-review/infrastructure/adapters/services/shell-quote';
+import {
+    fetchSubmodules,
+    isContainedRelativePath,
+    SubmoduleGitHost,
+} from '@libs/sandbox/infrastructure/providers/submodule-fetch';
+
+// 35 minutes — aligned with the lease lifecycle ceiling.
+// Lease docs expire at DEFAULT_LEASE_TTL_MS (30 min) and the reaper cron
+// runs every 5 min, so a sandbox is always explicitly killed by the reaper
+// within ≤35 min of creation regardless of E2B's own timeout. Setting
+// `timeoutMs` higher than that is dead weight. With `onTimeout: 'pause'`
+// + `autoResume: true`, hitting 35 min just pauses the sandbox — the
+// reaper then issues `Sandbox.kill` on the next cron tick.
+// E2B bills by live-minute, not by this ceiling — the pipeline's
+// onPipelineFinish observer calls sandbox.cleanup() on every exit path,
+// so this is a safety ceiling, not a cost floor.
+const SANDBOX_TIMEOUT_MS = 35 * 60 * 1000;
+
+// Every sandbox is tagged with the deployment that created it, so the orphan
+// sweep (SandboxLeaseReaperService) only ever kills its own: environments can
+// share one E2B key (dev and prod do), and a sweep only sees its own Mongo.
+export const E2B_DEPLOYMENT_METADATA_KEY = 'deployment';
+export function e2bDeploymentTag(apiNodeEnv: string | undefined): string {
+    return apiNodeEnv || 'unknown';
+}
+const REPO_DIR = '/home/user/repo';
+
+const TIMEOUTS = {
+    CLONE_MS: 300_000, // 5 min — large repos (cal.com, grafana) need more time for shallow clone
+    PROXY_DAEMON_MS: 10_000,
+    PROXY_CONFIG_MS: 5_000,
+    VERIFY_MS: 10_000,
+    // Submodule fetch is best-effort and must never hold a review hostage:
+    // a repo with several large submodules gets 2 min, then the review
+    // proceeds with whatever was populated (the rest report themselves as
+    // uninitialized to the agent).
+    SUBMODULES_MS: 120_000,
+    COMMAND_LONG_MS: 30_000,
+    COMMAND_SHORT_MS: 10_000,
+};
+
+export interface BuildE2BRemoteCommandsOptions {
+    /** Logger for the [SANDBOX-READ] empty-read warning (optional). */
+    logger?: SimpleLogger;
+    /** `context` field on the warning (e.g. the calling service name). */
+    logContext?: string;
+    /** Extra structured metadata merged into the warning (e.g. { prKey }). */
+    logMetadata?: Record<string, unknown>;
+}
+
+/**
+ * Resolve a repo-relative path against REPO_DIR, rejecting absolute paths and
+ * '..' traversal. Shared by every RemoteCommands implementation so the
+ * path-isolation contract cannot silently diverge.
+ */
+function resolveRepoPath(path: string): string {
+    if (path.startsWith('/')) {
+        throw new Error('Absolute paths are not allowed');
+    }
+    if (path.includes('..')) {
+        throw new Error('Path traversal using ".." is not allowed');
+    }
+    return `${REPO_DIR}/${path}`;
+}
+
+/**
+ * Build the read-only RemoteCommands (grep/read/listDir/exec) backed by an E2B
+ * sandbox. SINGLE SOURCE OF TRUTH: used by BOTH E2BSandboxService (creator) and
+ * SandboxLeaseManager (reconnect/joiner) so the two paths cannot drift — an
+ * earlier inline duplicate in the reconnect path ran commands from the wrong
+ * CWD and swallowed errors, silently blinding reconnected review passes.
+ *
+ * All relative paths resolve against REPO_DIR (the repo lives at
+ * /home/user/repo, NOT the sandbox CWD /home/user). Errors surface instead of
+ * being swallowed, and empty reads emit a [SANDBOX-READ] warning.
+ */
+export function buildE2BRemoteCommands(
+    sandbox: Sandbox,
+    opts: BuildE2BRemoteCommandsOptions = {},
+): RemoteCommands {
+    const { logger, logContext, logMetadata } = opts;
+
+    // E2B's commands.run THROWS a CommandExitError on any non-zero exit. Normalize
+    // it back to a result so read-only tools can inspect exitCode/stderr instead
+    // of treating "no matches" (rg exit 1) or a missing file as a broken tool.
+    const runCmd = async (
+        cmd: string,
+        runOpts?: { timeoutMs?: number },
+    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+        try {
+            return await sandbox.commands.run(cmd, runOpts);
+        } catch (err) {
+            if (err instanceof CommandExitError) {
+                return {
+                    stdout: err.stdout,
+                    stderr: err.stderr,
+                    exitCode: err.exitCode,
+                };
+            }
+            throw err;
+        }
+    };
+
+    return {
+        grep: async (
+            pattern: string,
+            path: string,
+            glob?: string,
+        ): Promise<string> => {
+            // Validate path (throws on '..' / absolute). rg then runs the ORIGINAL
+            // relative path inside REPO_DIR via `cd`, so only the throw is used.
+            resolveRepoPath(path);
+            const globArg = glob
+                ? ` --glob '${glob.replace(/'/g, "'\\''")}'`
+                : '';
+            const escapedPattern = pattern.replace(/'/g, "'\\''");
+            const safeRelativePath = path.replace(/'/g, "'\\''");
+            const result = await runCmd(
+                `cd ${REPO_DIR} && rg --no-heading -n '${escapedPattern}' '${safeRelativePath}'${globArg}`,
+                { timeoutMs: TIMEOUTS.COMMAND_LONG_MS },
+            );
+            // rg exit 1 = "no matches" (valid); exit >= 2 with stderr = real error.
+            if (!result.stdout && result.exitCode >= 2 && result.stderr) {
+                return `Error: ${result.stderr}`;
+            }
+            if (!result.stdout) {
+                return 'No matches found.';
+            }
+            return result.stdout;
+        },
+
+        read: async (
+            path: string,
+            start: number,
+            end: number,
+        ): Promise<string> => {
+            const escapedPath = resolveRepoPath(path).replace(/'/g, "'\\''");
+            // GNU sed rejects address 0, so start=end=0 means "whole file" (cat).
+            const cmd =
+                start === 0 && end === 0
+                    ? `cat '${escapedPath}'`
+                    : `sed -n '${start < 1 ? 1 : start},${end}p' '${escapedPath}'`;
+            const result = await runCmd(cmd, {
+                timeoutMs: TIMEOUTS.COMMAND_SHORT_MS,
+            });
+            if (!result.stdout) {
+                logger?.warn({
+                    message: `[SANDBOX-READ] Empty result for ${path}: exitCode=${result.exitCode} stderr=${(result.stderr || '').substring(0, 200)} cmd=${cmd}`,
+                    context: logContext,
+                    metadata: {
+                        ...logMetadata,
+                        path,
+                        exitCode: result.exitCode,
+                        stderr: (result.stderr || '').substring(0, 200),
+                    },
+                });
+            }
+            // THROW (not return a string) when the read failed — empty stdout +
+            // stderr means "No such file" / permission denied. Returning the error
+            // as content bypassed the readFile tool's catch block.
+            if (!result.stdout && result.stderr) {
+                throw new Error(result.stderr.trim());
+            }
+            return result.stdout;
+        },
+
+        listDir: async (path: string, maxDepth: number): Promise<string> => {
+            // Same shape as `grep` above, deliberately: validate, then `cd` into
+            // REPO_DIR and pass the ORIGINAL RELATIVE path, so the listing comes
+            // back relative to the repo root.
+            //
+            // This used to run `find` on the ABSOLUTE path with no `cd`, which
+            // made the listing absolute ("/home/user/repo/./README") while every
+            // caller compares against a repo-relative path. `RepoLookup.exists`
+            // does exactly that comparison, so it answered false for EVERY file,
+            // including files it had just read — sibling-file retrieval then told
+            // the judge a test was missing when it was there (issue #1826).
+            resolveRepoPath(path);
+            const safeRelativePath = path.replace(/'/g, "'\\''");
+            // `find` exits 1 both for "that path is not there" and for
+            // "I could not read it", so the exit code alone cannot separate a
+            // real absence from a broken lookup — and `RepoLookup.exists` must
+            // never confuse the two. The `[ -e ]` guard does separate them: a
+            // missing path short-circuits with NO stderr, while anything find
+            // itself complains about arrives WITH stderr.
+            const result = await runCmd(
+                `cd ${REPO_DIR} && [ -e '${safeRelativePath}' ] && find '${safeRelativePath}' -maxdepth ${maxDepth} -type f`,
+                { timeoutMs: TIMEOUTS.COMMAND_LONG_MS },
+            );
+            if (!result.stdout && result.stderr) {
+                return `Error: ${result.stderr}`;
+            }
+            return result.stdout;
+        },
+
+        exec: async (
+            command: string,
+        ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+            const result = await runCmd(`cd ${REPO_DIR} && ${command}`, {
+                timeoutMs: TIMEOUTS.COMMAND_LONG_MS,
+            });
+            // stdout and stderr kept SEPARATE — merging let a subprocess error
+            // masquerade as command output. Tools that want diagnostics use 2>&1.
+            return {
+                stdout: result.stdout,
+                stderr: result.stderr || '',
+                exitCode: result.exitCode,
+            };
+        },
+    };
+}
+
+/** Standalone so `syncE2BSandboxRepo` (reconnect path) and the instance
+ *  method (create path) can never drift — same reasoning as
+ *  `buildE2BRemoteCommands` above. */
+function resolvePrRefspec(
+    platform: PlatformType,
+    prNumber: number,
+    cloneUrl: string,
+    branch: string,
+): string {
+    switch (platform) {
+        case PlatformType.GITHUB:
+            return `refs/pull/${prNumber}/head`;
+        case PlatformType.GITLAB:
+            return `refs/merge-requests/${prNumber}/head`;
+        case PlatformType.BITBUCKET: {
+            const isCloud = /(^|\/\/|\.)bitbucket\.org(\/|$)/i.test(cloneUrl);
+            return isCloud
+                ? `refs/heads/${branch}`
+                : `refs/pull-requests/${prNumber}/from`;
+        }
+        case PlatformType.AZURE_REPOS:
+            return `refs/pull/${prNumber}/merge`;
+        default:
+            return `refs/pull/${prNumber}/head`;
+    }
+}
+
+/** Standalone so it can be shared with `syncE2BSandboxRepo` — see
+ *  `resolvePrRefspec` above for the same reasoning. */
+function buildGitAuthHeader(
+    platform: PlatformType,
+    token: string,
+    username?: string,
+): string {
+    switch (platform) {
+        case PlatformType.GITHUB:
+            return `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+        case PlatformType.BITBUCKET: {
+            const gitUsername = token.startsWith('ATATT')
+                ? 'x-bitbucket-api-token-auth'
+                : username;
+            if (!gitUsername) {
+                throw new Error(
+                    'Bitbucket authentication requires a username (app password) or an Atlassian API token, but neither was provided.',
+                );
+            }
+            return `Authorization: Basic ${Buffer.from(`${gitUsername}:${token}`).toString('base64')}`;
+        }
+        case PlatformType.GITLAB:
+        case PlatformType.AZURE_REPOS:
+            return `Authorization: Basic ${Buffer.from(`oauth2:${token}`).toString('base64')}`;
+        default:
+            return `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+    }
+}
+
+/**
+ * Populate the submodules a repository declares, after the checkout.
+ *
+ * Standalone (like `resolvePrRefspec` / `buildGitAuthHeader` above) because
+ * BOTH the create path and the reconnect path need it, and a submodule that is
+ * populated on round 1 but not on round 2 is the stale-checkout bug in another
+ * costume.
+ *
+ * Best-effort by contract: the GitHub App token may simply have no access to a
+ * private submodule repository, and that must degrade to "the agent is told the
+ * directory was never fetched" (#1939's marker), never to a failed review.
+ *
+ * Which submodules are eligible, and the scoping of the auth header, are
+ * decided by `buildSubmoduleUpdatePlan` — shared with the local provider so the
+ * two cannot drift.
+ */
+export async function fetchE2BSubmodules(
+    sandbox: Sandbox,
+    cloneUrl: string,
+    authHeader: string | undefined,
+    opts: {
+        logger?: SimpleLogger;
+        logContext?: string;
+        /**
+         * Which review this belongs to. Several reviews share one worker, so
+         * without it the `[SUBMODULES]` lines of concurrent reviews are
+         * indistinguishable in the log — which is exactly the question an
+         * operator asks when one repository's submodules did not populate.
+         */
+        logMetadata?: Record<string, unknown>;
+        /**
+         * Ref of the pull request's base branch, e.g. `origin/main`. Without
+         * it nothing is fetched — see `baseDeclaredDumpArgs`.
+         */
+        baseRef?: string;
+    } = {},
+): Promise<void> {
+    const {
+        logger,
+        logContext = 'fetchE2BSubmodules',
+        logMetadata = {},
+        baseRef,
+    } = opts;
+
+    // Thin adapter: the ORDER, the retries, the time budget and the logging
+    // all live in `fetchSubmodules`, shared with the local provider so the two
+    // cannot drift. Only these three primitives differ between them.
+    const host: SubmoduleGitHost = {
+        readGitmodules: async () => {
+            try {
+                const read = await sandbox.commands.run(
+                    `cat ${REPO_DIR}/.gitmodules`,
+                    { timeoutMs: TIMEOUTS.VERIFY_MS },
+                );
+                return read.stdout || '';
+            } catch {
+                return null;
+            }
+        },
+        git: async (args, runOpts) =>
+            sandbox.commands.run(
+                `cd ${REPO_DIR} && git ${args.map((a) => shSingleQuote(a)).join(' ')}`,
+                {
+                    timeoutMs: runOpts?.timeoutMs ?? TIMEOUTS.VERIFY_MS,
+                    ...(runOpts?.env ? { envs: runOpts.env } : {}),
+                },
+            ),
+        removeDir: async (relative) => {
+            // `relative` is built from the submodule NAME in `.gitmodules`,
+            // which the pull request author writes. `shSingleQuote` stops
+            // shell injection but not `..`, and this is `rm -rf`. The shared
+            // module rejects such a name, but the guard is repeated at the
+            // one place that deletes.
+            if (!isContainedRelativePath(relative)) {
+                throw new Error(
+                    `refusing to remove a path outside the checkout: ${relative}`,
+                );
+            }
+            await sandbox.commands.run(
+                `rm -rf ${shSingleQuote(`${REPO_DIR}/${relative}`)}`,
+                { timeoutMs: TIMEOUTS.COMMAND_SHORT_MS },
+            );
+        },
+    };
+
+    await fetchSubmodules(host, {
+        repoCloneUrl: cloneUrl,
+        baseRef,
+        authHeader,
+        totalBudgetMs: TIMEOUTS.SUBMODULES_MS,
+        stepTimeoutMs: TIMEOUTS.COMMAND_LONG_MS,
+        logger,
+        logContext,
+        logMetadata,
+    });
+}
+
+export interface SyncE2BSandboxRepoOptions {
+    logger?: SimpleLogger;
+    logContext?: string;
+    timeoutMs?: number;
+}
+
+/**
+ * Bring an EXISTING sandbox's repo checkout up to date with the CURRENT
+ * commit before it is reused for a new review round (SandboxLeaseManager's
+ * reconnect/joiner path — see `buildE2BRemoteCommands`'s docstring for why
+ * that path gets single-source-of-truth helpers).
+ *
+ * Without this, a sandbox paused after round 1 and resumed for round 2 keeps
+ * round 1's git checkout forever — `readFile`/`grep` inside the sandbox see
+ * the OLD commit while the diff/PreviousReviewDecisions context correctly
+ * describes the NEW one. Observed live: the agent read the pre-fix content
+ * of an already-fixed file and "file not found" for a file introduced only
+ * in the new commit, got confused by the contradiction, and silently
+ * dropped both a duplicate and a genuinely new, unrelated finding — a
+ * false negative unrelated to any prompt/memory logic, purely a stale
+ * working tree (#1313 e2e validation, 2026-09-11).
+ *
+ * `git fetch` + `checkout -f FETCH_HEAD` intentionally discards anything the
+ * previous round's agent may have left in the working tree — the ONLY
+ * source of truth for round N's review is round N's commit.
+ */
+export async function syncE2BSandboxRepo(
+    sandbox: Sandbox,
+    params: CreateSandboxParams,
+    opts: SyncE2BSandboxRepoOptions = {},
+): Promise<void> {
+    const {
+        cloneUrl,
+        authToken,
+        authUsername,
+        branch,
+        prNumber,
+        platform,
+        checkoutSha,
+    } = params;
+    const { logger, logContext, timeoutMs = TIMEOUTS.CLONE_MS } = opts;
+
+    // Same precedence as the create path (checkoutSha > PR refspec > branch
+    // tip) — CLI-origin reviews set checkoutSha and leave prNumber undefined,
+    // so without this a reused CLI sandbox synced to the branch tip instead
+    // of the merge-base commit the diff was actually computed against.
+    const refspec =
+        checkoutSha != null
+            ? checkoutSha
+            : prNumber != null
+              ? resolvePrRefspec(platform, prNumber, cloneUrl, branch)
+              : `refs/heads/${branch}`;
+
+    const hasAuth = !!authToken;
+    const authHeader = hasAuth
+        ? buildGitAuthHeader(platform, authToken, authUsername)
+        : '';
+
+    const safeCloneUrl = shSingleQuote(cloneUrl);
+    const safeRefspec = shSingleQuote(refspec);
+
+    const fetchCmd = hasAuth
+        ? `git -c http.extraHeader="$GIT_AUTH_HEADER" fetch --depth=1 ${safeCloneUrl} ${safeRefspec}`
+        : `git fetch --depth=1 ${safeCloneUrl} ${safeRefspec}`;
+
+    // `git checkout -f` only overwrites TRACKED files — a file the previous
+    // round's agent left in the working tree (scratch output, an untracked
+    // file outside the new commit) survives and keeps confusing round N's
+    // readFile/grep the same way the stale-checkout bug did. `git clean -fd`
+    // makes the tree exactly the fetched commit.
+    let result: { exitCode: number; stderr?: string };
+    try {
+        result = await sandbox.commands.run(
+            [
+                `cd ${REPO_DIR}`,
+                fetchCmd,
+                `git checkout -f FETCH_HEAD`,
+                `git clean -fd`,
+            ].join(' && '),
+            {
+                timeoutMs,
+                ...(hasAuth && { envs: { GIT_AUTH_HEADER: authHeader } }),
+            },
+        );
+    } catch (err) {
+        // sandbox.commands.run THROWS a CommandExitError on any non-zero
+        // exit (same as buildE2BRemoteCommands' runCmd above) — without this
+        // normalization the exitCode !== 0 branch below is unreachable and a
+        // real fetch/checkout failure escapes as an unhandled rejection.
+        result =
+            err instanceof CommandExitError
+                ? { exitCode: err.exitCode, stderr: err.stderr }
+                : {
+                      exitCode: -1,
+                      stderr: err instanceof Error ? err.message : String(err),
+                  };
+    }
+
+    if (result.exitCode !== 0) {
+        // Non-fatal: the reused sandbox falls back to its stale checkout
+        // (same behavior as before this fix existed) rather than failing
+        // the whole review over a sync hiccup.
+        logger?.warn?.({
+            message: `[DEBUG] syncE2BSandboxRepo: git sync failed (exit=${result.exitCode}), sandbox keeps its previous checkout`,
+            context: logContext ?? 'syncE2BSandboxRepo',
+            metadata: {
+                exitCode: result.exitCode,
+                stderr: result.stderr?.slice(0, 500),
+                refspec,
+            },
+        });
+        return;
+    }
+
+    // Round N's commit can move the submodule pointers, and `git clean -fd`
+    // does not descend into submodule directories — so without this a reused
+    // sandbox keeps round 1's submodule contents (or none at all) while the
+    // diff describes round N.
+    await fetchE2BSubmodules(
+        sandbox,
+        cloneUrl,
+        hasAuth ? authHeader : undefined,
+        {
+            logger,
+            logContext: logContext ?? 'syncE2BSandboxRepo',
+            logMetadata: { prNumber },
+            // Round N reuses the sandbox, so the base ref is whatever the
+            // previous round fetched. Absent or stale, the shared module
+            // fetches nothing and says so.
+            baseRef: params.baseBranch
+                ? `origin/${params.baseBranch}`
+                : undefined,
+        },
+    );
+
+    logger?.log?.({
+        message: `[DEBUG] syncE2BSandboxRepo: synced reused sandbox to refspec=${refspec}`,
+        context: logContext ?? 'syncE2BSandboxRepo',
+        metadata: { refspec },
+    });
+}
+
+@Injectable()
+export class E2BSandboxService implements ISandboxProvider {
+    private readonly logger = createLogger(E2BSandboxService.name);
+
+    constructor(private readonly configService: ConfigService) {}
+
+    isAvailable(): boolean {
+        return !!this.configService.get<string>('API_E2B_KEY');
+    }
+
+    isProxyConfigured(): boolean {
+        return !!this.configService.get<string>('E2B_PROXY_HOST');
+    }
+
+    async createSandboxWithRepo(
+        params: CreateSandboxParams,
+    ): Promise<SandboxInstance> {
+        const {
+            cloneUrl,
+            authToken,
+            authUsername,
+            branch,
+            prNumber,
+            platform,
+            baseBranch,
+        } = params;
+        const apiKey = this.configService.get<string>('API_E2B_KEY');
+
+        if (!apiKey) {
+            throw new Error('API_E2B_KEY is not configured');
+        }
+
+        this.logger.log({
+            message: `[DEBUG] Creating E2B sandbox for PR#${prNumber ?? '?'} branch=${branch}`,
+            context: E2BSandboxService.name,
+            metadata: {
+                cloneUrl,
+                branch,
+                prNumber,
+                platform,
+                hasAuthToken: !!authToken,
+            },
+        });
+
+        const { sandbox, usedTemplate } = await this.createSandbox(apiKey, {
+            ...(prNumber != null && { prNumber: String(prNumber) }),
+            ...params.sandboxMetadata,
+        });
+
+        this.logger.log({
+            message: `[DEBUG] E2B sandbox created (template=${usedTemplate}, id=${sandbox.sandboxId ?? 'unknown'})`,
+            context: E2BSandboxService.name,
+            metadata: { usedTemplate, sandboxId: sandbox.sandboxId },
+        });
+
+        try {
+            // Install dependencies only when not using a pre-built template
+            // When using a template, git/ripgrep and proxy are already configured
+            if (!usedTemplate) {
+                await this.installDependencies(sandbox);
+            }
+
+            // Configure Shadowsocks proxy for IP tunneling (clients with restricted git access)
+            await this.setupProxy(sandbox);
+
+            await this.cloneRepository(sandbox, params);
+
+            // CLI mode: when the user's branch isn't pushed (or there are
+            // uncommitted changes), the regular fetch above fails — we
+            // instead fetch the merge-base SHA (always present on the
+            // remote) and apply the local diff on top, recreating the
+            // working state inside the sandbox.
+            if (params.unifiedDiff && params.checkoutSha) {
+                await this.applyLocalDiff(sandbox, params.unifiedDiff);
+            }
+
+            // Fetch base branch so git diff origin/${baseBranch}...HEAD works
+            const resolvedBaseBranch = await this.fetchBaseBranch(
+                sandbox,
+                params,
+            );
+
+            // The checkout above is a shallow fetch with no submodule
+            // handling, so every path the repository declares in
+            // `.gitmodules` would otherwise be an empty directory the agent
+            // reads as "this code does not exist" (#1939). It runs HERE, not
+            // in `cloneRepository`, because the rule that bounds it needs the
+            // base branch to already be in the sandbox.
+            await fetchE2BSubmodules(
+                sandbox,
+                params.cloneUrl,
+                params.authToken
+                    ? this.buildAuthHeader(
+                          params.platform,
+                          params.authToken,
+                          params.authUsername,
+                      )
+                    : undefined,
+                {
+                    logger: this.logger,
+                    logContext: E2BSandboxService.name,
+                    logMetadata: { prNumber: params.prNumber },
+                    baseRef: resolvedBaseBranch
+                        ? `origin/${resolvedBaseBranch}`
+                        : undefined,
+                },
+            );
+
+            const remoteCommands = this.buildRemoteCommands(sandbox);
+
+            const cleanup = async () => {
+                try {
+                    await sandbox.kill();
+                } catch (error) {
+                    this.logger.warn({
+                        message: `Failed to kill E2B sandbox${prNumber ? ` for PR#${prNumber}` : ` for branch ${branch}`}`,
+                        context: E2BSandboxService.name,
+                        error,
+                    });
+                }
+            };
+
+            return {
+                remoteCommands,
+                cleanup,
+                type: 'e2b' as const,
+                sandboxId: sandbox.sandboxId,
+                baseBranch: resolvedBaseBranch,
+                repoDir: REPO_DIR,
+                run: async (
+                    command: string,
+                    opts?: {
+                        timeoutMs?: number;
+                        envs?: Record<string, string>;
+                    },
+                ): Promise<SandboxRunResult> => {
+                    const result = await sandbox.commands.run(command, {
+                        timeoutMs: opts?.timeoutMs ?? TIMEOUTS.COMMAND_LONG_MS,
+                        ...(opts?.envs && { envs: opts.envs }),
+                    });
+                    return {
+                        stdout: result.stdout || '',
+                        stderr: result.stderr || '',
+                        exitCode: result.exitCode,
+                    };
+                },
+                readFile: async (
+                    path: string,
+                    opts?: { timeoutMs?: number },
+                ): Promise<string> => {
+                    return sandbox.files.read(path, {
+                        requestTimeoutMs: opts?.timeoutMs ?? 600_000,
+                    });
+                },
+                writeFile: async (
+                    path: string,
+                    content: string,
+                ): Promise<void> => {
+                    await sandbox.files.write(path, content);
+                },
+            };
+        } catch (error) {
+            // If setup fails, kill the sandbox before re-throwing
+            try {
+                await sandbox.kill();
+            } catch {
+                // Ignore cleanup errors
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Set an idle timeout on an existing sandbox.
+     * Called by SandboxLeaseManager.release() when leaseCount hits 0 to set
+     * a short idle window before E2B pauses the sandbox automatically.
+     * The sandbox stays alive until idleMs elapses with no active connections.
+     */
+    async pauseAfterIdle(sandboxId: string, idleMs: number): Promise<void> {
+        const apiKey = this.configService.get<string>('API_E2B_KEY');
+        if (!apiKey) {
+            throw new Error('API_E2B_KEY is not configured');
+        }
+        await Sandbox.setTimeout(sandboxId, idleMs, { apiKey });
+        this.logger.log({
+            message: `[DEBUG] pauseAfterIdle: set idleMs=${idleMs} on sandboxId=${sandboxId}`,
+            context: E2BSandboxService.name,
+            metadata: { sandboxId, idleMs },
+        });
+    }
+
+    /**
+     * Connect to an existing sandbox by ID, resuming it if it is paused.
+     * SDK doc: "If the sandbox is paused, it will be automatically resumed"
+     * (e2b/dist/index.d.ts:7990). autoResume: true at create time is what
+     * makes this work — see createSandbox() above.
+     * Called by SandboxLeaseManager.acquire() when state === 'READY'.
+     */
+    async connectExisting(sandboxId: string): Promise<Sandbox> {
+        const apiKey = this.configService.get<string>('API_E2B_KEY');
+        if (!apiKey) {
+            throw new Error('API_E2B_KEY is not configured');
+        }
+        this.logger.log({
+            message: `[DEBUG] connectExisting: connecting to sandboxId=${sandboxId}`,
+            context: E2BSandboxService.name,
+            metadata: { sandboxId },
+        });
+        return Sandbox.connect(sandboxId, { apiKey });
+    }
+
+    private async installDependencies(sandbox: Sandbox): Promise<void> {
+        const installResult = await sandbox.commands.run(
+            'apt-get update -qq && apt-get install -y -qq git ripgrep shadowsocks-libev > /dev/null 2>&1',
+            { timeoutMs: TIMEOUTS.CLONE_MS, user: 'root' },
+        );
+        this.logger.log({
+            message: `[DEBUG] apt-get install exitCode=${installResult.exitCode}`,
+            context: E2BSandboxService.name,
+            metadata: {
+                exitCode: installResult.exitCode,
+                stderr: installResult.stderr?.slice(0, 300),
+            },
+        });
+    }
+
+    private async cloneRepository(
+        sandbox: Sandbox,
+        params: CreateSandboxParams,
+    ): Promise<void> {
+        const {
+            cloneUrl,
+            authToken,
+            authUsername,
+            branch,
+            prNumber,
+            platform,
+            checkoutSha,
+        } = params;
+
+        // CLI mode with merge-base SHA: fetch that SHA directly. Avoids
+        // depending on the user's branch existing on the remote (it may
+        // not be pushed yet) — the merge-base is always there.
+        // PR mode: fetch the PR refspec.
+        // Otherwise: fetch the branch ref.
+        const refspec =
+            checkoutSha != null
+                ? checkoutSha
+                : prNumber != null
+                  ? this.getPrRefspec(platform, prNumber, cloneUrl, branch)
+                  : `refs/heads/${branch}`;
+        const localRef =
+            checkoutSha != null
+                ? 'cli-base'
+                : prNumber != null
+                  ? 'pr-head'
+                  : 'cli-head';
+        // Skip auth header entirely for anonymous clones (trial users on
+        // public repos). Without this guard we'd send `x-access-token:` with
+        // an empty password — GitHub still accepts it for public reads but
+        // it's noise; for private repos we want the real 401/404 fast.
+        const hasAuth = !!authToken;
+        const authHeader = hasAuth
+            ? this.buildAuthHeader(platform, authToken, authUsername)
+            : '';
+
+        this.logger.log({
+            message: `[DEBUG] Git clone starting: refspec=${refspec} localRef=${localRef} cloneUrl=${cloneUrl}`,
+            context: E2BSandboxService.name,
+            metadata: {
+                refspec,
+                localRef,
+                cloneUrl,
+                platform,
+                hasProxy: this.isProxyConfigured(),
+                hasAuth,
+            },
+        });
+
+        // `refspec` and `localRef` are built from PR/branch data that can be
+        // controlled by a forked PR author; `cloneUrl` is ours but still best
+        // practice. Quote all three to keep the shell from interpreting any
+        // metacharacters a crafted ref name could carry.
+        const safeCloneUrl = shSingleQuote(cloneUrl);
+        const safeRefspec = shSingleQuote(refspec);
+        const safeLocalRef = shSingleQuote(localRef);
+
+        const fetchCmd = hasAuth
+            ? `git -c http.extraHeader="$GIT_AUTH_HEADER" fetch --depth=1 ${safeCloneUrl} ${safeRefspec}:${safeLocalRef}`
+            : `git fetch --depth=1 ${safeCloneUrl} ${safeRefspec}:${safeLocalRef}`;
+
+        const cloneResult = await sandbox.commands.run(
+            [
+                `git init ${REPO_DIR}`,
+                `cd ${REPO_DIR}`,
+                // Fetch using token from env var via git credential header (never touches disk/process args)
+                fetchCmd,
+                `git checkout ${safeLocalRef}`,
+                // Set a dummy remote for any tools that expect "origin" to exist
+                `git remote add origin ${safeCloneUrl}`,
+                // Block any push from the sandbox
+                `git remote set-url --push origin no-push-allowed`,
+            ].join(' && '),
+            {
+                timeoutMs: TIMEOUTS.CLONE_MS,
+                ...(hasAuth && { envs: { GIT_AUTH_HEADER: authHeader } }),
+            },
+        );
+
+        this.logger.log({
+            message: `[DEBUG] Git clone finished: exitCode=${cloneResult.exitCode} stdout=${(cloneResult.stdout || '').length}chars stderr=${(cloneResult.stderr || '').length}chars`,
+            context: E2BSandboxService.name,
+            metadata: {
+                exitCode: cloneResult.exitCode,
+                stdout: cloneResult.stdout?.slice(0, 500),
+                stderr: cloneResult.stderr?.slice(0, 500),
+            },
+        });
+
+        if (cloneResult.exitCode !== 0) {
+            throw new Error(
+                `Git clone failed in E2B sandbox (exit code ${cloneResult.exitCode}): ${cloneResult.stderr || cloneResult.stdout}`.slice(
+                    0,
+                    500,
+                ),
+            );
+        }
+
+        // Submodules are fetched by the caller, AFTER the base branch is in
+        // the sandbox: only a submodule declared identically on the base is
+        // fetched, and that declaration is read from the base ref (#1939).
+
+        // Verify repo contents after clone
+        const verifyResult = await sandbox.commands.run(
+            `ls -la ${REPO_DIR} && echo "---FILE-COUNT---" && find ${REPO_DIR} -maxdepth 2 -type f | head -20`,
+            { timeoutMs: TIMEOUTS.VERIFY_MS },
+        );
+        this.logger.log({
+            message: `[DEBUG] Repo contents after clone (first 500 chars): ${verifyResult.stdout?.slice(0, 500)}`,
+            context: E2BSandboxService.name,
+            metadata: {
+                exitCode: verifyResult.exitCode,
+                stdout: verifyResult.stdout?.slice(0, 500),
+            },
+        });
+    }
+
+    /**
+     * Apply a unified diff on top of the currently-checked-out commit. Used
+     * in CLI mode to recreate the user's local working state on top of the
+     * merge-base SHA we just cloned. `--3way` makes apply tolerant to
+     * context drift (it falls back to a 3-way merge using the blob SHAs
+     * embedded in the diff). Failure is non-fatal: we log and continue —
+     * worst case the agent reviews the merge-base instead of the user's
+     * local changes, which is still better than self-contained mode.
+     */
+    private async applyLocalDiff(
+        sandbox: Sandbox,
+        unifiedDiff: string,
+    ): Promise<void> {
+        const PATCH_PATH = '/tmp/fossa-cli.patch';
+
+        try {
+            await sandbox.files.write(PATCH_PATH, unifiedDiff);
+        } catch (error) {
+            this.logger.warn({
+                message:
+                    '[DEBUG] Failed to write CLI diff to sandbox; agent will review merge-base only',
+                context: E2BSandboxService.name,
+                error,
+            });
+            return;
+        }
+
+        // Configure a dummy identity so `git apply --3way` (which records a
+        // commit when it falls back) doesn't error on missing user.email.
+        // Then try `git apply --3way` first; if that fails, retry with
+        // `git apply --whitespace=fix` which is more permissive but loses
+        // 3-way fallback. Last resort: log and move on.
+        const result = await sandbox.commands.run(
+            [
+                `cd ${REPO_DIR}`,
+                `git config user.email fossa-cli@fossa.local`,
+                `git config user.name 'Fossa CLI'`,
+                `git apply --3way --whitespace=nowarn ${PATCH_PATH}`,
+            ].join(' && '),
+            { timeoutMs: TIMEOUTS.COMMAND_LONG_MS },
+        );
+
+        if (result.exitCode === 0) {
+            this.logger.log({
+                message: `[DEBUG] CLI diff applied successfully on top of merge-base`,
+                context: E2BSandboxService.name,
+            });
+            return;
+        }
+
+        this.logger.warn({
+            message: `[DEBUG] git apply --3way failed (exit=${result.exitCode}), retrying with --whitespace=fix`,
+            context: E2BSandboxService.name,
+            metadata: {
+                stderr: result.stderr?.slice(0, 500),
+            },
+        });
+
+        const retry = await sandbox.commands.run(
+            `cd ${REPO_DIR} && git apply --whitespace=fix --reject ${PATCH_PATH} || true`,
+            { timeoutMs: TIMEOUTS.COMMAND_LONG_MS },
+        );
+
+        this.logger.warn({
+            message: `[DEBUG] git apply fallback finished (exit=${retry.exitCode}); agent will see whichever hunks applied`,
+            context: E2BSandboxService.name,
+            metadata: {
+                stdout: retry.stdout?.slice(0, 300),
+                stderr: retry.stderr?.slice(0, 300),
+            },
+        });
+    }
+
+    /**
+     * Fetch the base branch (e.g. main/develop) so that git diff origin/${baseBranch}...HEAD
+     * works inside the sandbox. Returns the branch name on success, undefined on failure.
+     * Failure is non-fatal — tools will fall back to the GitHub API.
+     */
+    private async fetchBaseBranch(
+        sandbox: Sandbox,
+        params: CreateSandboxParams,
+    ): Promise<string | undefined> {
+        const { cloneUrl, authToken, authUsername, platform, baseBranch } =
+            params;
+        if (!baseBranch) return undefined;
+
+        const hasAuth = !!authToken;
+        const authHeader = hasAuth
+            ? this.buildAuthHeader(platform, authToken, authUsername)
+            : '';
+
+        this.logger.log({
+            message: `[DEBUG] Fetching base branch: ${baseBranch}`,
+            context: E2BSandboxService.name,
+            metadata: { baseBranch, hasAuth },
+        });
+
+        const safeBaseBranch = shSingleQuote(baseBranch);
+        const safeCloneUrl = shSingleQuote(cloneUrl);
+
+        const baseCmd = hasAuth
+            ? `cd ${REPO_DIR} && git -c http.extraHeader="$GIT_AUTH_HEADER" fetch --depth=1 ${safeCloneUrl} refs/heads/${safeBaseBranch}:refs/remotes/origin/${safeBaseBranch}`
+            : `cd ${REPO_DIR} && git fetch --depth=1 ${safeCloneUrl} refs/heads/${safeBaseBranch}:refs/remotes/origin/${safeBaseBranch}`;
+
+        try {
+            const result = await sandbox.commands.run(baseCmd, {
+                timeoutMs: TIMEOUTS.CLONE_MS,
+                ...(hasAuth && { envs: { GIT_AUTH_HEADER: authHeader } }),
+            });
+
+            if (result.exitCode === 0) {
+                this.logger.log({
+                    message: `[DEBUG] Base branch fetched successfully: origin/${baseBranch}`,
+                    context: E2BSandboxService.name,
+                });
+                return baseBranch;
+            }
+
+            this.logger.warn({
+                message: `[DEBUG] Failed to fetch base branch ${baseBranch}: exitCode=${result.exitCode} stderr=${(result.stderr || '').slice(0, 300)}`,
+                context: E2BSandboxService.name,
+            });
+            return undefined;
+        } catch (error) {
+            this.logger.warn({
+                message: `[DEBUG] Error fetching base branch ${baseBranch}, tools will use API fallback`,
+                context: E2BSandboxService.name,
+                error,
+            });
+            return undefined;
+        }
+    }
+
+    private async createSandbox(
+        apiKey: string,
+        metadata?: Record<string, string>,
+    ): Promise<{ sandbox: Sandbox; usedTemplate: boolean }> {
+        metadata = {
+            ...metadata,
+            [E2B_DEPLOYMENT_METADATA_KEY]: e2bDeploymentTag(
+                this.configService.get<string>('API_NODE_ENV'),
+            ),
+        };
+        const isGraphStage =
+            metadata?.stage === 'graph-build' ||
+            metadata?.stage === 'graph-incremental';
+
+        // Use dedicated graph template (2 GB) for graph build stages,
+        // fall back to the default template (1 GB) for everything else.
+        const templateId =
+            (isGraphStage
+                ? this.configService.get<string>('API_E2B_TEMPLATE_GRAPH_ID')
+                : undefined) ??
+            this.configService.get<string>('API_E2B_TEMPLATE_ID');
+
+        if (templateId) {
+            try {
+                // autoResume: true is required — SDK default is false; omitting it causes Sandbox.connect() to throw on paused sandboxes
+                const sandbox = await Sandbox.create(templateId, {
+                    timeoutMs: SANDBOX_TIMEOUT_MS,
+                    apiKey,
+                    metadata,
+                    lifecycle: { onTimeout: 'pause', autoResume: true }, // SBX-03: pause not kill; autoResume must be explicit
+                });
+                return { sandbox, usedTemplate: true };
+            } catch (error) {
+                this.logger.warn({
+                    message: `Failed to create E2B sandbox with template "${templateId}", falling back to default`,
+                    context: E2BSandboxService.name,
+                    error,
+                });
+            }
+        }
+
+        // autoResume: true is required — SDK default is false; omitting it causes Sandbox.connect() to throw on paused sandboxes
+        const sandbox = await Sandbox.create({
+            timeoutMs: SANDBOX_TIMEOUT_MS,
+            apiKey,
+            metadata,
+            lifecycle: { onTimeout: 'pause', autoResume: true }, // SBX-03: pause not kill; autoResume must be explicit
+        });
+        return { sandbox, usedTemplate: false };
+    }
+
+    private async setupProxy(sandbox: Sandbox): Promise<void> {
+        const host = this.configService.get<string>('E2B_PROXY_HOST');
+        if (!host) {
+            this.logger.log({
+                message: `[DEBUG] No E2B_PROXY_HOST configured, skipping proxy setup`,
+                context: E2BSandboxService.name,
+            });
+            return;
+        }
+
+        const port = this.configService.get<string>('E2B_PROXY_PORT') ?? '8388';
+        const password = this.configService.get<string>('E2B_PROXY_PASSWORD');
+        const method =
+            this.configService.get<string>('E2B_PROXY_METHOD') ?? 'aes-256-gcm';
+
+        if (!password) {
+            throw new Error(
+                'E2B_PROXY_PASSWORD is required when E2B_PROXY_HOST is set',
+            );
+        }
+
+        // Start ss-local daemon listening on SOCKS5 port 1080
+        await sandbox.commands.run(
+            `ss-local -s ${host} -p ${port} -l 1080 -k "$SS_PASSWORD" -m ${method} -d start`,
+            {
+                timeoutMs: TIMEOUTS.PROXY_DAEMON_MS,
+                user: 'root',
+                envs: { SS_PASSWORD: password },
+            },
+        );
+
+        // Route all git traffic through the SOCKS5 proxy
+        await sandbox.commands.run(
+            'git config --global http.proxy socks5://127.0.0.1:1080',
+            { timeoutMs: TIMEOUTS.PROXY_CONFIG_MS },
+        );
+
+        this.logger.log({
+            message: `[DEBUG] Proxy configured: ${host}:${port} method=${method}`,
+            context: E2BSandboxService.name,
+        });
+    }
+
+    private buildAuthHeader(
+        platform: PlatformType,
+        token: string,
+        username?: string,
+    ): string {
+        // Bitbucket's #1168 nuance (ATATT tokens need the literal username
+        // `x-bitbucket-api-token-auth`, not the account username) lives in
+        // the standalone `buildGitAuthHeader` now — see it for the full
+        // rationale. Delegates so this and `syncE2BSandboxRepo` can never
+        // drift, same reasoning as `buildE2BRemoteCommands`.
+        return buildGitAuthHeader(platform, token, username);
+    }
+
+    private getPrRefspec(
+        platform: PlatformType,
+        prNumber: number,
+        cloneUrl: string,
+        branch: string,
+    ): string {
+        // Delegates to the standalone `resolvePrRefspec` so the create path
+        // and `syncE2BSandboxRepo` (reconnect path) can never drift.
+        return resolvePrRefspec(platform, prNumber, cloneUrl, branch);
+    }
+
+    private buildRemoteCommands(sandbox: Sandbox): RemoteCommands {
+        // Delegates to the single shared implementation so the creator and the
+        // SandboxLeaseManager reconnect path can never drift again.
+        return buildE2BRemoteCommands(sandbox, {
+            logger: this.logger,
+            logContext: E2BSandboxService.name,
+        });
+    }
+}
+// sandbox-test

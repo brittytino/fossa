@@ -1,0 +1,221 @@
+import chalk from 'chalk';
+import fs from 'fs/promises';
+import path from 'path';
+import { confirm } from '@inquirer/prompts';
+import { gitService } from '../../services/git.service.js';
+import {
+    TRACE_HOOK_END_MARKER,
+    TRACE_HOOK_MARKER,
+} from '../../services/git-hooks.service.js';
+import { exitWithCode } from '../../utils/cli-exit.js';
+import { cliError, cliInfo } from '../../utils/logger.js';
+import type { GlobalOptions } from '../../types/cli.js';
+import { createCommandContext } from '../../utils/command-context.js';
+import {
+    buildAgentErrorEnvelope,
+    buildAgentSuccessEnvelope,
+    emitAgentEnvelope,
+} from '../../utils/command-output.js';
+import {
+    CommandError,
+    normalizeCommandError,
+} from '../../utils/command-errors.js';
+
+const FOSSA_MARKER = '# fossa-hook';
+
+export function extractTraceBlock(content: string | null): string | null {
+    if (!content) {
+        return null;
+    }
+
+    const lines = content.split('\n');
+    const start = lines.findIndex((line) => line.trim() === TRACE_HOOK_MARKER);
+    if (start === -1) {
+        return null;
+    }
+
+    const end = lines.findIndex(
+        (line, idx) => idx > start && line.trim() === TRACE_HOOK_END_MARKER,
+    );
+
+    return lines.slice(start, end === -1 ? undefined : end + 1).join('\n');
+}
+
+function generateHookScript(failOn: string, fast: boolean): string {
+    const flags: string[] = [];
+    if (fast) {
+        flags.push('--fast');
+    }
+    flags.push('--fail-on', failOn);
+    flags.push('--format', 'terminal');
+    flags.push('--quiet');
+
+    const reviewFlags = flags.join(' ');
+
+    return `#!/bin/sh
+${FOSSA_MARKER} — installed by fossa CLI
+# To uninstall: fossa hook uninstall
+
+# Skip hook if FOSSA_SKIP_HOOK is set
+if [ -n "$FOSSA_SKIP_HOOK" ]; then
+  exit 0
+fi
+
+# Check if fossa is available
+if ! command -v fossa >/dev/null 2>&1; then
+  echo "Warning: fossa CLI not found. Skipping pre-push review."
+  echo "Install: yarn global add @fossa/cli"
+  exit 0
+fi
+
+remote="$1"
+current_branch="$(git symbolic-ref --short HEAD 2>/dev/null)"
+
+while read local_ref local_sha remote_ref remote_sha; do
+  # Skip branch deletions
+  if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+    continue
+  fi
+
+  # New branch — no remote state to compare, skip review
+  if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+    continue
+  fi
+
+  # Extract branch name from ref (refs/heads/my-branch → my-branch)
+  branch_name="\${local_ref#refs/heads/}"
+
+  # Only review if pushing the currently checked-out branch
+  # (--branch compares against HEAD, so reviewing other refs would produce wrong diffs)
+  if [ "$branch_name" != "$current_branch" ]; then
+    continue
+  fi
+
+  # Review changes not yet on the remote
+  if ! fossa review --branch "\${remote}/\${branch_name}" ${reviewFlags}; then
+    exit 1
+  fi
+done
+`;
+}
+
+export async function installAction(
+    options: {
+        failOn?: string;
+        fast?: boolean;
+        force?: boolean;
+        dryRun?: boolean;
+    },
+    globalOpts?: GlobalOptions,
+): Promise<void> {
+    const ctx = createCommandContext('hook install', {
+        format: globalOpts?.format ?? 'terminal',
+        output: globalOpts?.output,
+        verbose: globalOpts?.verbose ?? false,
+        quiet: globalOpts?.quiet ?? false,
+        agent: globalOpts?.agent ?? false,
+    });
+    const failOn = options.failOn ?? 'critical';
+    const fast = options.fast !== false; // default true
+
+    try {
+        const isRepo = await gitService.isGitRepository();
+        if (!isRepo) {
+            throw new CommandError('NOT_IN_GIT_REPO', 'Not a git repository.');
+        }
+
+        const hooksDir = await gitService.getHooksDir();
+        const hookPath = path.join(hooksDir, 'pre-push');
+
+        // Check if hook already exists
+        let existingContent: string | null = null;
+        try {
+            existingContent = await fs.readFile(hookPath, 'utf-8');
+        } catch {
+            // File doesn't exist
+        }
+
+        const isFossaHook = existingContent
+            ? existingContent.includes(FOSSA_MARKER)
+            : false;
+
+        if (options.dryRun) {
+            const payload = {
+                action: 'hook install',
+                path: hookPath,
+                failOn,
+                fast,
+                hasExistingHook: !!existingContent,
+                wouldPromptForOverwrite:
+                    !!existingContent && !isFossaHook && !options.force,
+            };
+
+            if (ctx.isAgent) {
+                await emitAgentEnvelope(
+                    buildAgentSuccessEnvelope(
+                        ctx.command,
+                        payload,
+                        ctx.startedAt,
+                    ),
+                    ctx.outputFile,
+                );
+                return;
+            }
+
+            cliInfo(chalk.cyan('Dry run: no changes were made.'));
+            cliInfo(JSON.stringify(payload, null, 2));
+            return;
+        }
+
+        if (existingContent) {
+            if (!isFossaHook && !options.force) {
+                const overwrite = await confirm({
+                    message: 'A pre-push hook already exists. Overwrite it?',
+                    default: false,
+                });
+
+                if (!overwrite) {
+                    cliInfo(chalk.yellow('Installation cancelled.'));
+                    return;
+                }
+            }
+        }
+
+        // Ensure hooks directory exists
+        await fs.mkdir(hooksDir, { recursive: true });
+
+        // Write hook script. `fossa trace enable` appends its own block to the
+        // same file, so carry it across rather than silently disabling capture.
+        const script = generateHookScript(failOn, fast);
+        const preservedTraceBlock = extractTraceBlock(existingContent);
+        await fs.writeFile(
+            hookPath,
+            preservedTraceBlock
+                ? `${script.replace(/\s*$/, '')}\n\n${preservedTraceBlock}\n`
+                : script,
+            { mode: 0o755 },
+        );
+
+        cliInfo(chalk.green('✓ Pre-push hook installed successfully!'));
+        cliInfo(chalk.dim(`  Path: ${hookPath}`));
+        cliInfo(chalk.dim(`  Fail on: ${failOn}`));
+        cliInfo(chalk.dim(`  Fast mode: ${fast ? 'yes' : 'no'}`));
+        cliInfo('');
+        cliInfo(chalk.dim('Skip with: FOSSA_SKIP_HOOK=1 git push'));
+        cliInfo(chalk.dim('Remove with: fossa hook uninstall'));
+    } catch (error) {
+        const normalized = normalizeCommandError(error);
+        if (ctx.isAgent) {
+            await emitAgentEnvelope(
+                buildAgentErrorEnvelope(ctx.command, normalized, ctx.startedAt),
+                ctx.outputFile,
+            );
+            exitWithCode(normalized.exitCode);
+        }
+
+        cliError(chalk.red(`Error: ${normalized.message}`));
+        exitWithCode(normalized.exitCode);
+    }
+}
+
+export { FOSSA_MARKER, generateHookScript };

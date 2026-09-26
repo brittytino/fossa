@@ -1,0 +1,412 @@
+import type { ChangedFile, InlineCommentRef } from './diff-position.js';
+
+export type { ChangedFile, InlineCommentRef };
+
+export type Target = 'cloud' | 'self-hosted';
+
+export type ProviderName =
+    | 'github'
+    | 'github-app'
+    | 'gitlab'
+    | 'bitbucket'
+    | 'azure-devops';
+
+export type LicenseMode =
+    | 'free'
+    | 'trial'
+    | 'paid'
+    | 'community-byok' // free plan with the org's own LLM API key configured
+    | 'license-paid'
+    | 'license-free';
+
+export type Priority = 'P0' | 'P1' | 'P2';
+
+export interface TargetContext {
+    target: Target;
+    apiBaseUrl: string;
+    webBaseUrl: string;
+    tunnelUrl?: string;
+}
+
+export interface ProviderRepoRef {
+    full_name: string;
+    id: string | number;
+    name?: string;
+}
+
+export interface OpenPRArgs {
+    branch: string;
+    title: string;
+    body: string;
+    fixtureFiles: Record<string, string>;
+    /** Repo-relative paths to git-rm in the same commit (lifecycle tests: file removal must remove the synced rule). */
+    deleteFiles?: string[];
+    baseBranch?: string;
+}
+
+// For test repos that already have head/base branch pairs with deliberate
+// diffs committed (e.g. the forked benchmark repos in the fossa-e2e org).
+// No clone, no push — just opens a PR between two existing branches. Each
+// call creates a fresh PR number, so the `validate-new-commits` pipeline
+// stage always treats it as a new review (unlike re-triggering on a
+// standing PR, which gets short-circuited as "already reviewed").
+export interface OpenPRFromBranchesArgs {
+    head: string;
+    base: string;
+    title: string;
+    body: string;
+}
+
+export interface OpenedPR {
+    number: number;
+    url: string;
+    branch: string;
+    baseBranch: string;
+    // When true, `closePR` only closes the PR and does NOT delete the head
+    // branch. Used by `openPRFromBranches` where the branch is a permanent
+    // fixture in the test repo, not something the scenario created.
+    keepBranchOnClose?: boolean;
+}
+
+export interface ReviewSignal {
+    reviewComments: number;
+    issueComments: number;
+    reviews: number;
+    sample?: string;
+    /**
+     * Anchors of the inline comments Fossy posted, when the provider can report
+     * them. Counting comments proves a review happened; these prove it landed
+     * on the right lines — the check that the GitLab "comments only on added
+     * lines" bug slipped past. Providers that don't populate it leave the
+     * placement assertion self-skipping.
+     */
+    inlineComments?: InlineCommentRef[];
+    // Set when Fossy posted a license-related notification (e.g. "Your
+    // trial has ended! Activate your plan…" or a BYOK prompt) instead of
+    // a real review. Scenarios that expect the entitlement gate to
+    // BLOCK a review still want to verify Fossy told the user *why* —
+    // bare silence (no comment at all) is a different failure mode
+    // (webhook never arrived, pipeline crashed silently) than the
+    // intended UX. Providers populate this when they detect a
+    // license/trial/BYOK-prompt comment from Fossy on the PR.
+    licenseBlockedNotice?: {
+        message: string;
+        kind: 'trial-ended' | 'byok-required' | 'no-license' | 'other';
+    };
+}
+
+export interface ReviewThread {
+    id: string;
+    body: string;
+}
+
+export interface WebhookInfo {
+    id: string;
+    url: string;
+    active: boolean;
+    events: string[];
+}
+
+export interface Provider {
+    readonly name: ProviderName;
+    readonly integrationType: string;
+    readonly webhookPath: string;
+    repoRef(): Promise<ProviderRepoRef>;
+    createWebhook(webhookUrl: string): Promise<{ id: string }>;
+    deleteWebhook(id: string): Promise<void>;
+    // Lists webhooks currently registered against the target repo/project.
+    // Used by the onboarding-webhook-registration scenario to verify that
+    // Fossa's auto-register step actually wired a hook — the alternative
+    // (waiting for a review to materialize) only fails after 10+ min and
+    // doesn't distinguish "webhook never registered" from "review pipeline
+    // bug downstream of webhook receipt".
+    listWebhooks(): Promise<WebhookInfo[]>;
+    openPR(args: OpenPRArgs): Promise<OpenedPR>;
+    // Optional: opens a PR using two already-existing branches (head/base)
+    // without cloning or pushing. Providers that don't implement this throw
+    // a clear "not supported" error. See `OpenPRFromBranchesArgs` for the
+    // motivation (avoid `validate-new-commits` skip on standing PRs).
+    openPRFromBranches?(args: OpenPRFromBranchesArgs): Promise<OpenedPR>;
+    closePR(pr: OpenedPR): Promise<void>;
+    triggerReviewOnExistingPR(prNumber: number): Promise<{
+        triggerId: string;
+        sinceIso: string;
+    }>;
+    pollForReview(
+        pr: { number: number },
+        opts: { sinceIso: string; triggerId?: string; timeoutSec?: number },
+    ): Promise<ReviewSignal>;
+    // Phase-A poll for "Fossy acknowledged the PR" — i.e. ANY comment
+    // carrying the `<!-- fossy-codereview` marker has appeared on the
+    // PR (including the "Code Review Started!" placeholder that
+    // `pollForReview` deliberately filters out). Lets the scenario
+    // distinguish "review pipeline never woke up" (fail fast, ~60s)
+    // from "pipeline ran but LLM produced no findings" (the long
+    // 1500s budget). Optional because GitLab/Bitbucket/Azure aren't
+    // wired yet — code-review-basic only runs phase A when the
+    // provider implements this.
+    waitForPipelineStart?(
+        pr: { number: number },
+        opts: { sinceIso: string; timeoutSec: number },
+    ): Promise<{ startedAt: string; sample: string }>;
+    postComment(prNumber: number, body: string): Promise<{ id: string }>;
+    // Optional: posts a comment as a DIFFERENT identity (token override). The
+    // conversation scenario needs this — Fossy ignores comments whose author
+    // login contains "fossy"/"fossa" (the e2e bots), so the `@fossy` mention must
+    // come from a non-Fossy account.
+    postCommentAs?(
+        prNumber: number,
+        body: string,
+        token: string,
+    ): Promise<{ id: string }>;
+    // Optional: posts an INLINE review comment as a different identity. Fossy's
+    // ConversationAgent only resolves the mention from a review comment (issue
+    // comments are never found), so the conversation scenario needs this.
+    postReviewCommentAs?(
+        prNumber: number,
+        body: string,
+        token: string,
+    ): Promise<{ id: string }>;
+    // Optional: polls for Fossy's conversational reply to an `@fossy <question>`
+    // new non-trigger, non-code-review comment, or null at timeout. Wired on
+    // github/gitlab/bitbucket/azure-devops; the conversation scenario gates
+    // on its presence.
+    pollForFossyReply?(
+        pr: { number: number },
+        opts: { sinceIso: string; triggerId?: string; timeoutSec?: number },
+    ): Promise<{ id: string; body: string } | null>;
+    // Optional (#1946): the review threads Fossy opened on a PR, a reply
+    // inside one as another identity, and the thread read back in order.
+    // Drive conversation-implicit-reply (answers without @fossy).
+    listFossyThreads?(prNumber: number): Promise<ReviewThread[]>;
+    replyInThread?(
+        prNumber: number,
+        threadId: string,
+        body: string,
+        token: string,
+    ): Promise<{ id: string }>;
+    threadComments?(
+        prNumber: number,
+        threadId: string,
+    ): Promise<ReviewThread[]>;
+    // Optional: merges a PR (falls back to close). Drives the closed/merged-PR
+    // webhook that triggers fossy-issues generation (v2/BYOK path).
+    mergePR?(pr: OpenedPR): Promise<void>;
+    authMode(): 'token' | 'oauth' | 'app-password';
+    authToken(): string;
+    // Provider-specific extra body fields for POST /code-management/auth-integration.
+    // Azure DevOps needs `orgUrl` + `orgName`; everything else returns {}.
+    // Override only when the Fossa backend rejects a bare token+authMode body.
+    authExtraFields?(): Record<string, unknown>;
+    // Returns the id Fossa stores as `pullRequest.user.id` for PRs opened by
+    // this PAT — i.e. exactly what `validate-prerequisites.stage.ts` reads
+    // when deciding whether the author has a license seat. Per-provider:
+    //   * github / gitlab: numeric id from /user (stringified)
+    //   * bitbucket: uuid from /2.0/user with `{}` stripped (sanitizeUUID)
+    //   * azure-devops: authenticatedUser.id GUID from connectionData
+    currentUserId(): Promise<string>;
+    // Fossa's gitTool value for /license/assign (lowercase platformType).
+    // Matches `assignLicense(provider.toLowerCase())` in license.service.ts.
+    licenseGitTool(): string;
+    // Detects Fossy's "blocked: PR author has no license seat" signal on the
+    // PR since `sinceIso`. validate-prerequisites.stage.ts emits a 👎 on
+    // USER_NOT_LICENSED — a reaction on github/gitlab, a comment carrying the
+    // docs.fossa.local emoji-meaning link on bitbucket/azure. Resolves true once
+    // the signal appears (false at timeout). This lets a scenario assert the
+    // seat gate ACTIVELY blocked the review, rather than inferring it from the
+    // mere absence of a review comment — absence also happens when a webhook
+    // is lost or routed to another tenant, so it cannot prove the block.
+    pollForLicenseBlock?(
+        pr: { number: number },
+        opts: { sinceIso: string; timeoutSec?: number },
+    ): Promise<boolean>;
+    // Optional: the files this PR changes, with their unified-diff patches.
+    // Feeds the review-placement assertion (lib/diff-position.ts) — without
+    // the diff there is nothing to validate a comment's anchor against.
+    // Providers that don't implement it make the assertion self-skip.
+    listChangedFiles?(pr: { number: number }): Promise<ChangedFile[]>;
+    // Optional: pushes a follow-up commit onto an ALREADY-OPEN PR's branch —
+    // used by scenarios that need a real 2nd review round (e.g. "the
+    // developer applies the suggestion for real", not just an `@fossy
+    // review` re-trigger on the same diff). Optional because it needs a
+    // real git remote (cloneUrl), same constraint openPR already has.
+    pushFollowupCommit?(
+        pr: OpenedPR,
+        files: Record<string, string>,
+        commitMessage: string,
+    ): Promise<void>;
+    // Optional: raw bodies of Fossy's real review comments (inline + PR-level,
+    // status/license-notice placeholders excluded) posted since `sinceIso`,
+    // optionally restricted to comments anchored to `path`. `pollForReview`
+    // only returns counts + one truncated sample — scenarios that need to
+    // pattern-match content across ALL of a round's comments (e.g. "did any
+    // comment re-raise the issue this file's fix already addressed") need
+    // this instead.
+    listReviewCommentBodies?(
+        pr: { number: number },
+        opts: { sinceIso: string; path?: string },
+    ): Promise<string[]>;
+    // Idempotent pre-flight sweep — closes/abandons every PR (or MR) on
+    // the fixture repo whose title starts with `[e2e]` and is still
+    // open. Called once per (provider, target) pair at matrix start,
+    // BEFORE any scenario runs. Reason: the per-scenario `closePR()`
+    // finally block only fires on the happy path. A scenario crash, a
+    // SIGINT to the runner, or a parallel-cell abort all leave PRs
+    // open; the next matrix run then hits provider-specific errors
+    // (Azure HTTP 409 "active PR exists on this branch pair",
+    // GitHub/GitLab webhook bursts on auto-closed orphans, Bitbucket
+    // PR-number drift). Cleanup at the start makes every run start
+    // from a known-clean state regardless of how the previous run
+    // ended. Filters strictly by `[e2e]` title prefix so we never
+    // touch PRs a human opened on the same repo.
+    cleanupStaleE2EArtifacts(): Promise<{ closed: number }>;
+}
+
+export interface TenantCredentials {
+    email: string;
+    password: string;
+    // Optional per-tenant fixture repo (cloud only). When set, the
+    // provider for this cell targets THIS repo instead of the
+    // env-resolved per-target default. Required for cloud GitHub PAT
+    // tenants, where each license tier is a separate Fossa org: sharing
+    // one repo across orgs makes the webhook→org resolution ambiguous
+    // (it picks the first org by updatedAt DESC), so the test's own org
+    // isn't reliably the one that reviews its PR. One repo per tenant
+    // restores the 1 org : 1 repo invariant the other providers already
+    // have. `owner/name` form, e.g. `fossa-e2e/tiny-url-cloud-paid`.
+    repoFullName?: string;
+}
+
+export interface FossaSession {
+    accessToken: string;
+    organizationId: string;
+    teamId: string;
+}
+
+export interface RunContext {
+    target: TargetContext;
+    provider: Provider;
+    license: LicenseMode;
+    tenant?: TenantCredentials;
+    fossa: {
+        login: (creds: TenantCredentials) => Promise<FossaSession>;
+        registerIntegration: (session: FossaSession) => Promise<void>;
+        registerRepo: (
+            session: FossaSession,
+            opts?: { forceRecreate?: boolean },
+        ) => Promise<ProviderRepoRef>;
+        finishOnboarding: (
+            session: FossaSession,
+            repo: ProviderRepoRef,
+        ) => Promise<void>;
+    };
+    assert: (cond: unknown, msg: string) => asserts cond;
+    // Throw ScenarioSkipError (via this helper) when a scenario can
+    // detect at runtime that its preconditions aren't met and the
+    // outcome should be recorded as `skipped` rather than `failed`.
+    // Used by upgrade-n-1-to-n when not invoked from the upgrade
+    // provisioning script — the assertion-shaped failure was
+    // misleading bottom-line counts.
+    skip: (reason: string) => never;
+    artifactDir: string;
+    runId: string;
+}
+
+// Sentinel thrown by `ctx.skip(...)`. The matrix runner catches
+// this specifically and records the cell as `skipped` instead of
+// `failed`. Plain Error subclasses won't match (we check by name
+// to survive a bundler dropping prototype-chain identity).
+export class ScenarioSkipError extends Error {
+    readonly name = 'ScenarioSkipError';
+    constructor(reason: string) {
+        super(reason);
+    }
+}
+
+export type ScenarioStatus = 'passed' | 'failed' | 'skipped' | 'blocked';
+
+// WHY a result is `skipped`. Before this existed, four unrelated outcomes
+// collapsed into one number and the run reported green either way:
+//
+//   not-applicable  the scenario's appliesTo excludes this cell. EXPECTED —
+//                   it is the matrix being sparse by design, not a gap.
+//   setup           a required secret/fixture/license file is absent, so the
+//                   scenario cannot run here. A COVERAGE GAP: the check we
+//                   believe we have is not actually running.
+//   infra           the scenario SHOULD have run and we could not verify it —
+//                   GitHub quota exhausted, target unreachable. NOT a pass.
+//
+// Only `not-applicable` is silent. `setup` is reported; `infra` on a P0
+// scenario makes the whole run INCONCLUSIVE (see cli/run-matrix.ts).
+export type SkipKind = 'not-applicable' | 'setup' | 'infra';
+
+// A run's bottom line. `inconclusive` is the state the matrix could not
+// express before: nothing failed, but we did not verify enough to call it
+// green either.
+export type RunVerdict = 'green' | 'inconclusive' | 'red';
+
+export interface ScenarioResult {
+    scenarioId: string;
+    cell: {
+        target: Target;
+        provider: ProviderName;
+        license: LicenseMode;
+    };
+    status: ScenarioStatus;
+    /** Set whenever `status === 'skipped'`. See SkipKind. */
+    skipKind?: SkipKind;
+    /**
+     * True when the scenario failed on attempt 1 and passed on the retry.
+     * `status` stays `passed` (it did pass), but a cell that only passes on
+     * the second try is a flake, and a flake that nobody counts is how an
+     * intermittent product bug stays invisible. `lib/history.ts` carries this
+     * into the durable log so `e2e:report` can compute a real flake rate.
+     */
+    flaky?: boolean;
+    durationMs: number;
+    evidence: Record<string, unknown>;
+    errorMessage?: string;
+    errorStack?: string;
+    startedAt: string;
+    finishedAt: string;
+}
+
+export interface ScenarioAppliesTo {
+    target?: Target[];
+    provider?: ProviderName[];
+    license?: LicenseMode[];
+}
+
+export interface Scenario {
+    id: string;
+    title: string;
+    priority: Priority;
+    appliesTo: ScenarioAppliesTo;
+    timeoutSec?: number;
+    run: (ctx: RunContext) => Promise<Record<string, unknown>>;
+}
+
+export interface MatrixCell {
+    target: Target;
+    provider: ProviderName;
+    license: LicenseMode;
+    /**
+     * Restrict this cell to a specific set of scenarios.
+     *
+     * Exists for CANARY cells: once the matrix moves to GitHub App auth, one
+     * cell stays on a PAT purely to prove the token path still works, and it
+     * should run a single review scenario rather than the whole suite. Without
+     * this the only way to express that was a separate matrix file, which
+     * drifts from the real one.
+     *
+     * Omitted → every scenario whose appliesTo matches the cell.
+     */
+    only?: string[];
+}
+
+export interface MatrixConfig {
+    id: string;
+    description?: string;
+    scenarios: string[];
+    cells: MatrixCell[];
+}

@@ -1,0 +1,407 @@
+#content-area:has(.fossa-changelog-release) #header .eyebrow {
+    display: none;
+}
+
+body:has(.fossa-changelog-release) div.ml-4.flex.text-sm.leading-6.whitespace-nowrap.min-w-0.space-x-3.overflow-hidden {
+    display: none;
+}
+
+body:has(.fossa-changelog-release) #content-side-layout,
+body:has(.fossa-changelog-release) #table-of-contents-layout,
+body:has(.fossa-changelog-release) #table-of-contents {
+    display: none !important;
+}
+
+body:has(.fossa-changelog-release) #content-container {
+    max-width: none !important;
+    padding-right: 24rem !important;
+}
+
+body:has(.fossa-changelog-release) #content-area {
+    width: 100% !important;
+    max-width: 54rem !important;
+    margin-right: auto !important;
+    margin-left: 0 !important;
+}
+
+body:has(.fossa-changelog-release) header a[href*="changelog"] {
+    position: relative;
+    color: #faf8f6 !important;
+}
+
+body:has(.fossa-changelog-release) header a[href*="changelog"] *,
+body:has(.fossa-changelog-release) header a[href*="changelog"] svg {
+    color: #faf8f6 !important;
+    stroke: currentColor;
+}
+
+body:has(.fossa-changelog-release) header a[href*="changelog"]::after {
+    content: "";
+    position: absolute;
+    right: 0;
+    bottom: -1px;
+    left: 0;
+    height: 2px;
+    background: #f8b76d;
+}
+
+body:has(.fossa-changelog-release) header a[href*="changelog"]:hover,
+header a[href*="changelog"]:hover {
+    color: #f8b76d !important;
+}
+
+body:has(.fossa-changelog-release) header a[href*="changelog"]:hover *,
+body:has(.fossa-changelog-release) header a[href*="changelog"]:hover svg,
+header a[href*="changelog"]:hover *,
+header a[href*="changelog"]:hover svg {
+    color: #f8b76d !important;
+    stroke: currentColor;
+}
+
+.fossa-changelog-release {
+    display: grid;
+    grid-template-columns: minmax(6.5rem, 8rem) minmax(0, 36rem);
+    column-gap: 1.75rem;
+    align-items: start;
+    margin-top: 2.5rem;
+    padding-top: 2rem;
+    border-top: 1px solid rgba(248, 183, 109, 0.18);
+}
+
+.fossa-changelog-release[hidden] {
+    display: none !important;
+}
+
+.fossa-changelog-meta {
+    position: sticky;
+    top: 8.5rem;
+    align-self: start;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.65rem;
+}
+
+.fossa-changelog-date {
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    line-height: inherit;
+}
+
+.fossa-changelog-rss-source {
+    display: none;
+}
+
+.fossa-changelog-content {
+    min-width: 0;
+    max-width: 36rem;
+}
+
+.fossa-changelog-shell {
+    position: relative;
+}
+
+.fossa-changelog-filter-panel {
+    margin-top: 0;
+}
+
+.fossa-changelog-filter-control {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    appearance: none;
+    border: 1px solid transparent;
+    border-radius: inherit;
+    background: transparent;
+    cursor: pointer;
+}
+
+.fossa-changelog-filter-sidebar {
+    position: fixed;
+    top: 12rem;
+    right: max(2rem, calc((100vw - 88rem) / 2 + 2rem));
+    width: 20rem;
+    z-index: 9999;
+    pointer-events: auto;
+}
+
+.fossa-changelog-filter-heading {
+    margin: 0 0 0.7rem;
+    color: #faf8f6;
+    font: inherit;
+    font-size: 0.78em;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.fossa-changelog-filter-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+}
+
+.fossa-changelog-filter-button {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.85rem;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    color: inherit;
+    cursor: pointer;
+    padding: 0.24rem 0.78rem;
+    font: inherit;
+    font-size: 0.78em;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    user-select: none;
+    overflow: hidden;
+    transition:
+        background-color 140ms ease,
+        color 140ms ease;
+}
+
+.fossa-changelog-filter-button span {
+    position: relative;
+    z-index: 2;
+    pointer-events: none;
+}
+
+.fossa-changelog-filter-button:hover .fossa-changelog-filter-control:not(:checked) {
+    background: rgba(248, 183, 109, 0.12);
+}
+
+.fossa-changelog-filter-button:hover span {
+    color: #f8b76d;
+}
+
+.fossa-changelog-filter-button.is-selected,
+.fossa-changelog-filter-button:has(.fossa-changelog-filter-control:checked) {
+    border-color: rgba(248, 183, 109, 0.22) !important;
+    background: rgba(248, 183, 109, 0.14) !important;
+    color: #f8b76d !important;
+}
+
+.fossa-changelog-filter-control:checked {
+    border-color: rgba(248, 183, 109, 0.22) !important;
+    background: rgba(248, 183, 109, 0.14) !important;
+}
+
+.fossa-changelog-filter-control:checked + span {
+    color: #f8b76d !important;
+}
+
+.fossa-changelog-shell:has(.fossa-changelog-filter-control:checked) .fossa-changelog-filterable,
+.fossa-changelog-shell:has(.fossa-changelog-filter-control:checked) .fossa-changelog-section {
+    display: none;
+}
+
+.fossa-changelog-shell:has(.fossa-changelog-filter-control:checked) .fossa-changelog-release {
+    display: none;
+}
+
+.fossa-changelog-shell:has(#fossa-filter-security:checked) .filter-security,
+.fossa-changelog-shell:has(#fossa-filter-cockpit:checked) .filter-cockpit,
+.fossa-changelog-shell:has(#fossa-filter-byok:checked) .filter-byok,
+.fossa-changelog-shell:has(#fossa-filter-ai-engine:checked) .filter-ai-engine,
+.fossa-changelog-shell:has(#fossa-filter-self-hosted:checked) .filter-self-hosted,
+.fossa-changelog-shell:has(#fossa-filter-git-provider:checked) .filter-git-provider,
+.fossa-changelog-shell:has(#fossa-filter-performance:checked) .filter-performance,
+.fossa-changelog-shell:has(#fossa-filter-ux-interface:checked) .filter-ux-interface,
+.fossa-changelog-shell:has(#fossa-filter-notifications:checked) .filter-notifications,
+.fossa-changelog-shell:has(#fossa-filter-fossy-rules:checked) .filter-fossy-rules,
+.fossa-changelog-shell:has(#fossa-filter-mcp:checked) .filter-mcp,
+.fossa-changelog-shell:has(#fossa-filter-billing-licenses:checked) .filter-billing-licenses,
+.fossa-changelog-shell:has(#fossa-filter-cli:checked) .filter-cli,
+.fossa-changelog-shell:has(#fossa-filter-security:checked) .fossa-changelog-section:has(.filter-security),
+.fossa-changelog-shell:has(#fossa-filter-cockpit:checked) .fossa-changelog-section:has(.filter-cockpit),
+.fossa-changelog-shell:has(#fossa-filter-byok:checked) .fossa-changelog-section:has(.filter-byok),
+.fossa-changelog-shell:has(#fossa-filter-ai-engine:checked) .fossa-changelog-section:has(.filter-ai-engine),
+.fossa-changelog-shell:has(#fossa-filter-self-hosted:checked) .fossa-changelog-section:has(.filter-self-hosted),
+.fossa-changelog-shell:has(#fossa-filter-git-provider:checked) .fossa-changelog-section:has(.filter-git-provider),
+.fossa-changelog-shell:has(#fossa-filter-performance:checked) .fossa-changelog-section:has(.filter-performance),
+.fossa-changelog-shell:has(#fossa-filter-ux-interface:checked) .fossa-changelog-section:has(.filter-ux-interface),
+.fossa-changelog-shell:has(#fossa-filter-notifications:checked) .fossa-changelog-section:has(.filter-notifications),
+.fossa-changelog-shell:has(#fossa-filter-fossy-rules:checked) .fossa-changelog-section:has(.filter-fossy-rules),
+.fossa-changelog-shell:has(#fossa-filter-mcp:checked) .fossa-changelog-section:has(.filter-mcp),
+.fossa-changelog-shell:has(#fossa-filter-billing-licenses:checked) .fossa-changelog-section:has(.filter-billing-licenses),
+.fossa-changelog-shell:has(#fossa-filter-cli:checked) .fossa-changelog-section:has(.filter-cli) {
+    display: block;
+}
+
+.fossa-changelog-shell:has(#fossa-filter-security:checked) .fossa-changelog-release:has(.filter-security),
+.fossa-changelog-shell:has(#fossa-filter-cockpit:checked) .fossa-changelog-release:has(.filter-cockpit),
+.fossa-changelog-shell:has(#fossa-filter-byok:checked) .fossa-changelog-release:has(.filter-byok),
+.fossa-changelog-shell:has(#fossa-filter-ai-engine:checked) .fossa-changelog-release:has(.filter-ai-engine),
+.fossa-changelog-shell:has(#fossa-filter-self-hosted:checked) .fossa-changelog-release:has(.filter-self-hosted),
+.fossa-changelog-shell:has(#fossa-filter-git-provider:checked) .fossa-changelog-release:has(.filter-git-provider),
+.fossa-changelog-shell:has(#fossa-filter-performance:checked) .fossa-changelog-release:has(.filter-performance),
+.fossa-changelog-shell:has(#fossa-filter-ux-interface:checked) .fossa-changelog-release:has(.filter-ux-interface),
+.fossa-changelog-shell:has(#fossa-filter-notifications:checked) .fossa-changelog-release:has(.filter-notifications),
+.fossa-changelog-shell:has(#fossa-filter-fossy-rules:checked) .fossa-changelog-release:has(.filter-fossy-rules),
+.fossa-changelog-shell:has(#fossa-filter-mcp:checked) .fossa-changelog-release:has(.filter-mcp),
+.fossa-changelog-shell:has(#fossa-filter-billing-licenses:checked) .fossa-changelog-release:has(.filter-billing-licenses),
+.fossa-changelog-shell:has(#fossa-filter-cli:checked) .fossa-changelog-release:has(.filter-cli) {
+    display: grid;
+}
+
+.fossa-changelog-empty {
+    display: none;
+    margin: 0;
+    color: inherit;
+    font: inherit;
+    line-height: inherit;
+}
+
+.fossa-changelog-section + .fossa-changelog-section {
+    margin-top: 3rem;
+    padding-top: 2rem;
+    border-top: 1px solid rgba(248, 183, 109, 0.16);
+}
+
+.fossa-changelog-section-label {
+    display: block;
+    margin: 0 0 2rem;
+    color: #f8b76d;
+    font: inherit;
+    font-size: 1em;
+    font-weight: 700;
+    letter-spacing: 0;
+    line-height: inherit;
+    text-transform: none;
+}
+
+.fossa-changelog-item + .fossa-changelog-item {
+    margin-top: 2.5rem;
+}
+
+.fossa-changelog-title {
+    margin: 0;
+    color: #ffffff;
+    font: inherit;
+    font-size: 1.25em;
+    font-weight: 700;
+    letter-spacing: 0;
+    line-height: 1.35;
+}
+
+.fossa-changelog-copy {
+    display: block;
+    margin: 0.85rem 0 0;
+    color: inherit;
+    font: inherit;
+    line-height: inherit;
+}
+
+.fossa-changelog-link {
+    color: #f8b76d;
+    font-weight: 700;
+    text-decoration: underline;
+    text-decoration-color: rgba(248, 183, 109, 0.7);
+    text-underline-offset: 0.2em;
+}
+
+.fossa-changelog-code {
+    border-radius: 0.35rem;
+    background: rgba(248, 183, 109, 0.14);
+    color: #f8b76d;
+    padding: 0.1rem 0.35rem;
+    font-size: 0.9em;
+}
+
+.fossa-changelog-video {
+    display: block;
+    width: 100%;
+    margin: 1.25rem 0 0;
+    border: 1px solid rgba(248, 183, 109, 0.22);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.25);
+}
+
+.fossa-changelog-list {
+    margin: 0.85rem 0 0;
+    padding-left: 1.25rem;
+    color: inherit;
+    font: inherit;
+    line-height: inherit;
+}
+
+.fossa-changelog-list li + li {
+    margin-top: 0.5rem;
+}
+
+.fossa-changelog-fix-list {
+    margin-top: 0.85rem;
+}
+
+.fossa-changelog-fix {
+    padding-left: 1.25rem;
+    position: relative;
+}
+
+.fossa-changelog-fix .fossa-changelog-copy {
+    margin-top: 0;
+}
+
+.fossa-changelog-fix-label {
+    color: #ffffff;
+    font-weight: 700;
+}
+
+.fossa-changelog-fix::before {
+    content: "";
+    position: absolute;
+    top: 0.75em;
+    left: 0.15rem;
+    width: 0.35rem;
+    height: 0.35rem;
+    border-radius: 999px;
+    background: currentColor;
+    opacity: 0.68;
+}
+
+.fossa-changelog-fix + .fossa-changelog-fix {
+    margin-top: 1.1rem;
+}
+
+@media (max-width: 1120px) {
+    .fossa-changelog-release {
+        grid-template-columns: 6.5rem minmax(0, 1fr);
+        column-gap: 1.25rem;
+    }
+
+    .fossa-changelog-filter-sidebar {
+        grid-column: 1 / -1;
+        grid-row: 1;
+        position: static;
+        margin-bottom: 1.5rem;
+        width: auto;
+    }
+
+    .fossa-changelog-meta {
+        grid-column: 1;
+        grid-row: 2;
+    }
+
+    .fossa-changelog-content {
+        grid-column: 2;
+        grid-row: 2;
+    }
+
+}
+
+@media (prefers-color-scheme: light) {
+    .fossa-changelog-title {
+        color: #111827;
+    }
+
+    .fossa-changelog-fix-label {
+        color: #111827;
+    }
+}

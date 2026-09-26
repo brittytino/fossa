@@ -1,0 +1,505 @@
+import { PullRequestsRepository } from './pullRequests.repository';
+import type { OrganizationAndTeamData } from '@libs/core/infrastructure/config/types/general/organizationAndTeamData';
+import {
+    MAX_PATCH_BYTES_PER_FILE,
+    TRUNCATED_DIFF_MARKER,
+} from '@libs/platformData/domain/pullRequests/utils/diff-budget';
+
+/**
+ * Regression coverage for the cross-organization data leak that allowed
+ * mutations on PR#X / repo "foo" of org A to land on PR#X / repo "foo" of
+ * org B (because Mongo filters were missing organizationId).
+ *
+ * If any of these tests fails, someone has either dropped the organizationId
+ * filter on a write/read path that needs it, or has stopped propagating the
+ * organizationAndTeamData parameter — either of which reopens the leak.
+ */
+describe('PullRequestsRepository — multi-tenant filter coverage', () => {
+    const ORG: OrganizationAndTeamData = {
+        organizationId: 'org-A',
+        teamId: 'team-1',
+    };
+
+    let model: any;
+    let repo: PullRequestsRepository;
+    let findOneAndUpdate: jest.Mock;
+    let aggregate: jest.Mock;
+    let exec: jest.Mock;
+
+    beforeEach(() => {
+        exec = jest.fn().mockResolvedValue(null);
+        findOneAndUpdate = jest.fn().mockReturnValue({ exec });
+        aggregate = jest.fn().mockReturnValue({ exec });
+
+        model = {
+            findOneAndUpdate,
+            aggregate,
+        };
+
+        // The repository only depends on the `pullRequestsModel` field,
+        // so constructing without Nest DI keeps the test focused.
+        repo = new PullRequestsRepository(model as any);
+    });
+
+    describe('findNumbersByRepositoryId (token-usage repo filter)', () => {
+        const mockFind = (docs: Array<{ number: number }>) => {
+            const findExec = jest.fn().mockResolvedValue(docs);
+            const lean = jest.fn().mockReturnValue({ exec: findExec });
+            const limit = jest.fn().mockReturnValue({ lean });
+            const sort = jest.fn().mockReturnValue({ limit });
+            model.find = jest.fn().mockReturnValue({ sort });
+            return { find: model.find as jest.Mock, sort, limit };
+        };
+
+        it('filters by org + repository.id, projects only the number, and caps the result', async () => {
+            const { find, sort, limit } = mockFind([
+                { number: 7 },
+                { number: 9 },
+            ]);
+
+            const numbers = await repo.findNumbersByRepositoryId(
+                'org-A',
+                'repo-alpha',
+            );
+
+            expect(numbers).toEqual([7, 9]);
+            const [filter, projection] = find.mock.calls[0];
+            expect(filter).toEqual({
+                organizationId: 'org-A',
+                'repository.id': 'repo-alpha',
+            });
+            expect(projection).toEqual({ number: 1 });
+            // Newest first, bounded so a huge repo can't blow up the $in.
+            expect(sort).toHaveBeenCalledWith({ createdAt: -1 });
+            expect(limit).toHaveBeenCalledWith(10_000);
+        });
+
+        it('bounds by createdAt when an `until` date is given', async () => {
+            const { find } = mockFind([]);
+            const until = new Date('2026-06-30');
+
+            await repo.findNumbersByRepositoryId('org-A', 'r', until);
+
+            expect(find.mock.calls[0][0]).toEqual({
+                organizationId: 'org-A',
+                'repository.id': 'r',
+                createdAt: { $lte: until },
+            });
+        });
+    });
+
+    describe('addFileToPullRequest', () => {
+        it('includes organizationId in the Mongo filter', async () => {
+            await repo.addFileToPullRequest(
+                42,
+                'cal.com',
+                {
+                    path: 'src/foo.ts',
+                    sha: 'abc',
+                    filename: 'foo.ts',
+                    previousName: '',
+                    status: 'added',
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    suggestions: [],
+                    added: 1,
+                    deleted: 0,
+                    changes: 1,
+                } as any,
+                ORG,
+            );
+
+            expect(findOneAndUpdate).toHaveBeenCalledTimes(1);
+            const filter = findOneAndUpdate.mock.calls[0][0];
+            expect(filter).toMatchObject({
+                'number': 42,
+                'repository.name': 'cal.com',
+                'organizationId': 'org-A',
+            });
+        });
+
+        it('uses the organizationId from the argument, not a hardcoded value', async () => {
+            await repo.addFileToPullRequest(
+                42,
+                'cal.com',
+                {} as any,
+                { organizationId: 'org-B', teamId: 'team-1' },
+            );
+
+            const filter = findOneAndUpdate.mock.calls[0][0];
+            expect(filter.organizationId).toBe('org-B');
+        });
+    });
+
+    describe('addSuggestionToFile', () => {
+        it('includes organizationId AND files.id in the Mongo filter', async () => {
+            await repo.addSuggestionToFile(
+                'file-id-1',
+                { suggestionContent: 'x' } as any,
+                42,
+                'cal.com',
+                ORG,
+            );
+
+            expect(findOneAndUpdate).toHaveBeenCalledTimes(1);
+            const filter = findOneAndUpdate.mock.calls[0][0];
+            expect(filter).toMatchObject({
+                'number': 42,
+                'repository.name': 'cal.com',
+                'organizationId': 'org-A',
+                'files.id': 'file-id-1',
+            });
+        });
+    });
+
+    describe('updateFile', () => {
+        it('includes organizationId in the Mongo filter (defense in depth on top of files.id)', async () => {
+            await repo.updateFile(
+                'file-id-1',
+                { status: 'modified' } as any,
+                ORG,
+            );
+
+            expect(findOneAndUpdate).toHaveBeenCalledTimes(1);
+            const filter = findOneAndUpdate.mock.calls[0][0];
+            expect(filter).toMatchObject({
+                'files.id': 'file-id-1',
+                'organizationId': 'org-A',
+            });
+        });
+    });
+
+    describe('translateFileBulkOp (updateFile) — storage-level patch clamp', () => {
+        function translate(prUuid: string, data: Record<string, unknown>) {
+            return (repo as any).translateFileBulkOp(prUuid, 'org-A', {
+                kind: 'updateFile',
+                fileId: 'file-1',
+                data,
+            }) as {
+                updateOne: {
+                    filter: Record<string, unknown>;
+                    update: { $set: Record<string, unknown> };
+                };
+            };
+        }
+
+        it('escalates patchTruncated when the storage clamp cuts the patch (a later `false` in the same payload cannot clobber it)', async () => {
+            // Overwhelm MAX_PATCH_BYTES_PER_FILE so the storage-level clamp
+            // truncates the patch and must mark it truncated. The payload
+            // carries an explicit `patchTruncated: false` AFTER `patch` in
+            // insertion order; pre-fix the generic `$set[files.$.patchTruncated]`
+            // line would overwrite the escalation and the sub-document would
+            // claim a capped diff is complete (#1841).
+            const huge = 'a'.repeat(MAX_PATCH_BYTES_PER_FILE + 10);
+            const doc = translate('pr-uuid-clamp', {
+                status: 'modified',
+                patch: huge,
+                patchTruncated: false,
+            });
+
+            const flat = Object.keys(doc.updateOne.update.$set);
+            expect(flat).toContain('files.$.patchTruncated');
+            expect(doc.updateOne.update.$set['files.$.patchTruncated']).toBe(
+                true,
+            );
+            expect(doc.updateOne.update.$set['files.$.patch']).toContain(
+                TRUNCATED_DIFF_MARKER,
+            );
+        });
+
+        it('passes through the payload patchTruncated when the storage clamp does not cut the patch', async () => {
+            const small = 'a'.repeat(100);
+            const doc = translate('pr-uuid-noclamp', {
+                status: 'modified',
+                patch: small,
+                patchTruncated: false,
+            });
+
+            // No clamp fired, so the payload's explicit `false` flows through
+            // unchanged — the flag reflects the actual diff completeness.
+            expect(
+                doc.updateOne.update.$set['files.$.patchTruncated'],
+            ).toBe(false);
+            expect(doc.updateOne.update.$set['files.$.patch']).toBe(small);
+        });
+    });
+
+    describe('updateSuggestion', () => {
+        it('includes organizationId in the Mongo filter (defense in depth on top of suggestions.id)', async () => {
+            await repo.updateSuggestion(
+                'sugg-id-1',
+                { implementationStatus: 'IMPLEMENTED' } as any,
+                ORG,
+            );
+
+            expect(findOneAndUpdate).toHaveBeenCalledTimes(1);
+            const filter = findOneAndUpdate.mock.calls[0][0];
+            expect(filter).toMatchObject({
+                'files.suggestions.id': 'sugg-id-1',
+                'organizationId': 'org-A',
+            });
+        });
+    });
+
+    describe('findFileWithSuggestions', () => {
+        it('includes organizationId in the aggregation $match', async () => {
+            // aggregate().exec() must resolve to an array
+            (exec as jest.Mock).mockResolvedValueOnce([]);
+
+            await repo.findFileWithSuggestions(
+                42,
+                'cal.com',
+                'src/foo.ts',
+                ORG,
+            );
+
+            expect(aggregate).toHaveBeenCalledTimes(1);
+            const pipeline = aggregate.mock.calls[0][0];
+            const firstMatch = pipeline[0]?.$match;
+            expect(firstMatch).toMatchObject({
+                'number': 42,
+                'repository.name': 'cal.com',
+                'organizationId': 'org-A',
+            });
+        });
+    });
+
+    describe('findSuggestionsByPRAndFilenames (issue #1313 — PrDecisionStore read)', () => {
+        it('includes organizationId AND repository.fullName in the FIRST $match (multi-tenant + cross-repo scope)', async () => {
+            (exec as jest.Mock).mockResolvedValueOnce([]);
+
+            await repo.findSuggestionsByPRAndFilenames(
+                42,
+                'brittytino/fossa',
+                ['src/foo.ts'],
+                'org-A',
+                'sent' as any,
+            );
+
+            expect(aggregate).toHaveBeenCalledTimes(1);
+            const pipeline = aggregate.mock.calls[0][0];
+            const firstMatch = pipeline[0]?.$match;
+            expect(firstMatch).toMatchObject({
+                'number': 42,
+                'repository.fullName': 'brittytino/fossa',
+                'organizationId': 'org-A',
+            });
+        });
+
+        it('filters files by the given filenames via $in (never returns suggestions from unrelated files)', async () => {
+            (exec as jest.Mock).mockResolvedValueOnce([]);
+
+            await repo.findSuggestionsByPRAndFilenames(
+                42,
+                'brittytino/fossa',
+                ['src/a.ts', 'src/b.ts'],
+                'org-A',
+                'sent' as any,
+            );
+
+            const pipeline = aggregate.mock.calls[0][0];
+            const fileMatch = pipeline.find(
+                (stage: any) => stage.$match?.['files.path'],
+            )?.$match;
+            expect(fileMatch).toEqual({
+                'files.path': { $in: ['src/a.ts', 'src/b.ts'] },
+            });
+        });
+
+        it('scopes to the given deliveryStatus (never returns unsent/failed suggestions)', async () => {
+            (exec as jest.Mock).mockResolvedValueOnce([]);
+
+            await repo.findSuggestionsByPRAndFilenames(
+                42,
+                'brittytino/fossa',
+                ['src/a.ts'],
+                'org-A',
+                'sent' as any,
+            );
+
+            const pipeline = aggregate.mock.calls[0][0];
+            const capStage = pipeline.find(
+                (stage: any) => stage.$addFields?.['files.suggestions'],
+            )?.$addFields['files.suggestions'];
+            const filterCond =
+                capStage.$slice[0].$sortArray.input.$filter.cond;
+            expect(filterCond).toEqual({
+                $eq: ['$$suggestion.deliveryStatus', 'sent'],
+            });
+        });
+
+        // Perf hardening (Fossy PR #1895 review): files.suggestions accumulates
+        // one entry per review round, so this caps per file BEFORE $unwind
+        // instead of fetching a long-lived PR's whole suggestion history and
+        // discarding most of it in JS (BuildPreviousReviewDecisionsUseCase's
+        // own cap). Filter-then-sort-then-slice, in that order, so an
+        // unrelated never-sent suggestion can never push a real SENT one out
+        // of the kept window.
+        it('caps files.suggestions to the most recent 5 PER FILE before unwinding, filtering deliveryStatus before the sort/slice', async () => {
+            (exec as jest.Mock).mockResolvedValueOnce([]);
+
+            await repo.findSuggestionsByPRAndFilenames(
+                42,
+                'brittytino/fossa',
+                ['src/a.ts'],
+                'org-A',
+                'sent' as any,
+            );
+
+            const pipeline = aggregate.mock.calls[0][0];
+            const addFieldsIndex = pipeline.findIndex(
+                (stage: any) => stage.$addFields?.['files.suggestions'],
+            );
+            const unwindSuggestionsIndex = pipeline.findIndex(
+                (stage: any) => stage.$unwind === '$files.suggestions',
+            );
+            expect(addFieldsIndex).toBeGreaterThanOrEqual(0);
+            expect(addFieldsIndex).toBeLessThan(unwindSuggestionsIndex);
+
+            const capStage =
+                pipeline[addFieldsIndex].$addFields['files.suggestions'];
+            expect(capStage.$slice[1]).toBe(5);
+            expect(capStage.$slice[0].$sortArray.sortBy).toEqual({
+                createdAt: -1,
+            });
+            // Filter (deliveryStatus) must be the innermost step — applied
+            // BEFORE sortArray/slice, not after. $ifNull guards a file
+            // pushed without a `suggestions` key at all (addFileToPullRequest
+            // $push'es whatever IFile it's given).
+            expect(
+                capStage.$slice[0].$sortArray.input.$filter.input,
+            ).toEqual({ $ifNull: ['$files.suggestions', []] });
+        });
+
+        it('short-circuits without querying Mongo when filenames is empty', async () => {
+            const result = await repo.findSuggestionsByPRAndFilenames(
+                42,
+                'brittytino/fossa',
+                [],
+                'org-A',
+                'sent' as any,
+            );
+
+            expect(result).toEqual([]);
+            expect(aggregate).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('findPrLevelSuggestionsByPR (issue #1313 Fase 1b — PR-level PrDecisionStore read)', () => {
+        it('includes organizationId AND repository.fullName in the FIRST $match (multi-tenant + cross-repo scope)', async () => {
+            (exec as jest.Mock).mockResolvedValueOnce([]);
+
+            await repo.findPrLevelSuggestionsByPR(
+                42,
+                'brittytino/fossa',
+                'org-A',
+                'sent' as any,
+            );
+
+            expect(aggregate).toHaveBeenCalledTimes(1);
+            const pipeline = aggregate.mock.calls[0][0];
+            const firstMatch = pipeline[0]?.$match;
+            expect(firstMatch).toMatchObject({
+                'number': 42,
+                'repository.fullName': 'brittytino/fossa',
+                'organizationId': 'org-A',
+            });
+        });
+
+        it('unwinds prLevelSuggestions (NOT files.suggestions — a separate top-level array)', async () => {
+            (exec as jest.Mock).mockResolvedValueOnce([]);
+
+            await repo.findPrLevelSuggestionsByPR(
+                42,
+                'brittytino/fossa',
+                'org-A',
+                'sent' as any,
+            );
+
+            const pipeline = aggregate.mock.calls[0][0];
+            expect(pipeline.some((s: any) => s.$unwind === '$prLevelSuggestions')).toBe(
+                true,
+            );
+            expect(pipeline.some((s: any) => s.$unwind === '$files')).toBe(false);
+        });
+
+        it('scopes to the given deliveryStatus (never returns unsent/failed suggestions)', async () => {
+            (exec as jest.Mock).mockResolvedValueOnce([]);
+
+            await repo.findPrLevelSuggestionsByPR(
+                42,
+                'brittytino/fossa',
+                'org-A',
+                'sent' as any,
+            );
+
+            const pipeline = aggregate.mock.calls[0][0];
+            const capStage = pipeline.find(
+                (stage: any) => stage.$addFields?.prLevelSuggestions,
+            )?.$addFields.prLevelSuggestions;
+            const filterCond =
+                capStage.$slice[0].$sortArray.input.$filter.cond;
+            expect(filterCond).toEqual({
+                $eq: ['$$suggestion.deliveryStatus', 'sent'],
+            });
+        });
+
+        it('caps prLevelSuggestions to the most recent 5 before unwinding (same growth risk as files.suggestions)', async () => {
+            (exec as jest.Mock).mockResolvedValueOnce([]);
+
+            await repo.findPrLevelSuggestionsByPR(
+                42,
+                'brittytino/fossa',
+                'org-A',
+                'sent' as any,
+            );
+
+            const pipeline = aggregate.mock.calls[0][0];
+            const addFieldsIndex = pipeline.findIndex(
+                (stage: any) => stage.$addFields?.prLevelSuggestions,
+            );
+            const unwindIndex = pipeline.findIndex(
+                (stage: any) => stage.$unwind === '$prLevelSuggestions',
+            );
+            expect(addFieldsIndex).toBeGreaterThanOrEqual(0);
+            expect(addFieldsIndex).toBeLessThan(unwindIndex);
+
+            const capStage =
+                pipeline[addFieldsIndex].$addFields.prLevelSuggestions;
+            expect(capStage.$slice[1]).toBe(5);
+            expect(capStage.$slice[0].$sortArray.sortBy).toEqual({
+                createdAt: -1,
+            });
+        });
+    });
+
+    describe('regression — distinct orgs, same PR# + repo name', () => {
+        // Simulates what happened in production: 8 different orgs running
+        // benchmarks against the same forked repos (cal.com, sentry, ...).
+        // findOneAndUpdate is supposed to scope to one org per call; the
+        // test asserts each call carries its own organizationId so two
+        // concurrent calls cannot collide on the same document.
+        it('two calls with the same PR# and repo name but different orgs send different filters', async () => {
+            await repo.addFileToPullRequest(
+                5,
+                'cal.com',
+                { path: 'a.ts' } as any,
+                { organizationId: 'org-A', teamId: 't' },
+            );
+            await repo.addFileToPullRequest(
+                5,
+                'cal.com',
+                { path: 'b.ts' } as any,
+                { organizationId: 'org-B', teamId: 't' },
+            );
+
+            expect(findOneAndUpdate).toHaveBeenCalledTimes(2);
+            expect(findOneAndUpdate.mock.calls[0][0].organizationId).toBe(
+                'org-A',
+            );
+            expect(findOneAndUpdate.mock.calls[1][0].organizationId).toBe(
+                'org-B',
+            );
+        });
+    });
+});

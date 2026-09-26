@@ -1,0 +1,99 @@
+{
+    "__doc": [
+        "Per-model quality floors for the finder-recall eval (--set=pr, 8 PRs).",
+        "Gate = RUN MEAN vs floor — never per-PR (per-PR recall sd is 0.14-0.23;",
+        "individual PRs scoring 0 is normal).",
+        "",
+        "recallFloor  = observed recall_mean − 2·SEM (SEM = cross-PR sd / √8).",
+        "minMeanFindings / minMeanToolCalls = ~half the observed per-case mean —",
+        "low-noise collapse detectors: they don't move on recall noise, they trip",
+        "when the engine breaks (prompt lost, tools dead, findings not parsed).",
+        "",
+        "Calibrated 2026-07-02 from one full --set=pr run per model on the",
+        "post-#1424 engine (evals/investigation/results/finder-recall-<model>-pr.json).",
+        "RATCHET RULE: when a PR intentionally improves/regresses a model, update",
+        "that model's floors in the same PR with a fresh --set=pr run as evidence.",
+        "",
+        "JUDGE (#1447): floors were calibrated under the claude-sonnet-4-6 judge;",
+        "the judge is now claude-haiku-4-5. Validated invariant in the agreement",
+        "study (evals/investigation/agreement/): per-PR recall mean shifts −0.3pp —",
+        "far inside cross-PR noise (SEM ~5-6pp) — so these floors stay valid as-is."
+    ],
+    "set": "pr",
+    "models": {
+        "gpt-5.4": {
+            "recallFloor": 0.06,
+            "minMeanFindings": 1.0,
+            "minMeanToolCalls": 15,
+            "observed": { "recall_mean": 0.163, "sd": 0.139, "meanFindings": 2.3, "meanToolCalls": 35.4 }
+        },
+        "claude-sonnet-4-6": {
+            "recallFloor": 0.12,
+            "minMeanFindings": 2.5,
+            "minMeanToolCalls": 18,
+            "observed": { "recall_mean": 0.258, "sd": 0.193, "meanFindings": 5.3, "meanToolCalls": 35.9 }
+        },
+        "kimi-k2.7-code": {
+            "recallFloor": 0.16,
+            "minMeanFindings": 3.0,
+            "minMeanToolCalls": 25,
+            "observed": { "recall_mean": 0.315, "sd": 0.154, "meanFindings": 6.4, "meanToolCalls": 58.3 }
+        },
+        "glm-5.2": {
+            "recallFloor": 0.15,
+            "minMeanFindings": 1.5,
+            "minMeanToolCalls": 20,
+            "observed": { "recall_mean": 0.315, "sd": 0.231, "meanFindings": 3.0, "meanToolCalls": 48.3 }
+        },
+        "gemini-3.1-pro-preview-customtools": {
+            "recallFloor": 0.11,
+            "minMeanFindings": 1.5,
+            "minMeanToolCalls": 14,
+            "observed": { "recall_mean": 0.238, "sd": 0.185, "meanFindings": 3.5, "meanToolCalls": 28.5 }
+        },
+        "gemini-3-flash-preview": {
+            "recallFloor": 0.12,
+            "minMeanFindings": 2.5,
+            "minMeanToolCalls": 17,
+            "observed": { "recall_mean": 0.233, "sd": 0.157, "meanFindings": 5.3, "meanToolCalls": 35.4 }
+        }
+    },
+    "sets": {
+        "light": {
+            "__doc": [
+                "Floors for the NIGHTLY run (code-review-evals-nightly.yml): --set=light, 30 PRs.",
+                "",
+                "Finder runs: two in CI on the same commit (run 35171204422, attempts 1 and 2),",
+                "deepseek-v4-flash@fireworks. Judge: gpt-5.6-luna, reasoning effort low, applied to",
+                "those runs' saved findings with evals/investigation/rejudge.js (run 35253466493):",
+                "recall_mean 0.368 and 0.346. The same tool with the previous judge (gpt-5.4-mini)",
+                "reproduced run 1 at 0.395 vs 0.384 originally, and luna agrees with mini on 94.7% of",
+                "the per-bug decisions over the same findings.",
+                "",
+                "The floor comes from RUN-TO-RUN noise on these 30 PRs, not cross-PR spread: the",
+                "per-PR recall difference between the two runs has sd 0.329, so a night's mean",
+                "moves 0.329/sqrt(2)/sqrt(30) = 0.042, and against this 2-run baseline",
+                "0.042*sqrt(1.5) = 0.052. recallFloor 0.24 = 0.357 - ~2.2 sigma: a ~11pp drop trips",
+                "it, a normal night does ~1-2% of the time; a drop is then confirmed on a second run.",
+                "minMeanFindings / minMeanToolCalls = ~half the observed mean (2.7 / 41.5).",
+                "",
+                "JUDGE: floors hold only under `judge` + `judgeReasoningEffort`; the gate refuses a",
+                "run judged otherwise. To change the judge, re-judge two calibration runs with",
+                "rejudge.js (cents, no finder re-run) and update this block in the same PR.",
+                "",
+                "RATCHET RULE: when a PR intentionally moves recall, re-run --set=light twice",
+                "on it and update these floors in the same PR."
+            ],
+            "judge": "gpt-5.6-luna",
+            "judgeReasoningEffort": "low",
+            "models": {
+                "deepseek-v4-flash@fireworks": {
+                    "recallFloor": 0.24,
+                    "minMeanFindings": 1.3,
+                    "minMeanToolCalls": 20,
+                    "observed": { "recall_mean": 0.357, "runs": [0.368, 0.346], "sdPerPrRunDiff": 0.329, "precision_mean": 0.518, "meanFindings": 2.7, "meanToolCalls": 41.5 }
+                }
+            }
+        }
+    }
+}

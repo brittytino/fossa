@@ -1,0 +1,55 @@
+---
+title: "MCP Manager"
+description: "Despliega MCP Manager para Fossa."
+icon: "puzzle-piece"
+tag: 'beta'
+---
+
+## ¿Qué son los MCPs?
+
+Model Context Protocol (MCP) es un estándar abierto que permite a las aplicaciones de LLM conectarse a
+herramientas externas y fuentes de datos a través de una interfaz de servidor consistente. Los servidores
+MCP publican esquemas de herramientas y endpoints para que clientes como Fossa/Fossy puedan obtener
+contexto o ejecutar acciones durante un flujo de trabajo.
+
+## Arquitectura de MCP Manager
+
+MCP Manager es el servicio backend que gestiona esas conexiones MCP para
+Fossa. Lleva un registro de los proveedores, integraciones y herramientas permitidas por
+workspace, y luego expone ese catálogo a la API de Fossa.
+
+- Registro central de proveedores MCP (Fossa y personalizados)
+- Almacena metadatos de integración (estado de conexión, URL MCP, herramientas permitidas)
+- Gestiona los flujos de autenticación específicos de cada proveedor y el descubrimiento de herramientas
+- Expone APIs que Fossa usa para listar e invocar herramientas MCP
+
+```mermaid
+graph TD
+    A[Fossa] --> B[MCP Manager]
+    B --> C[Providers]
+    C --> D[Fossa MCPs]
+    C --> F[Custom]
+```
+
+## Plugins en Fossa
+
+Todo lo registrado en MCP Manager aparece en la pantalla de **Plugins** de Fossa,
+para que tu equipo pueda instalar, gestionar y habilitar los MCPs disponibles para cada
+workspace.
+
+<img src="/images/fossa_plugins.png" alt="Pantalla de plugins de Fossa mostrando MCPs del MCP Manager" />
+
+## Proveedores
+
+### Proveedor Fossa
+
+El proveedor Fossa agrupa los MCPs de primera parte gestionados por Fossa, incluyendo el
+Fossa MCP, Context7 MCP y Fossa Docs MCP.
+
+### Proveedores personalizados
+
+Puedes agregar proveedores personalizados para integrar sistemas internos o plataformas de terceros.
+En despliegues auto-hospedados, lista el proveedor en
+`API_MCP_MANAGER_MCP_PROVIDERS` y luego implementa el proveedor en el código fuente de MCP Manager.
+La implementación de referencia se encuentra aquí:
+[repositorio fossa-mcp-manager](https://github.com/brittytino/fossa-mcp-manager#-adding-a-new-provider)

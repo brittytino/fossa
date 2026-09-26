@@ -1,0 +1,27 @@
+---
+title: "GitLabでAIコードレビューをセットアップする方法"
+description: "GitLabプロジェクトにFossaをインストールして設定し、すべてのマージリクエストで自動AIコードレビューを受けます。"
+---
+
+FossaはOAuthとWebhookを通じてGitLabと統合します。設定されると、マージリクエストが自動的にレビューされます。
+
+## 手順
+
+1. [fossa.local](https://github.com/brittytino/fossa)で**アカウントを作成**するか、[Fossaをセルフホスト](/ja/how_to_deploy/deploy_fossa/generic_vm)します
+2. **GitLabに接続** — セットアップ中にOAuth経由で認証します
+3. **Webhookを設定** — ガイド付きセットアップに従ってマージリクエストイベントを有効にします
+4. **プロジェクトを選択** — Fossaがレビューすべきプロジェクトを選択します
+5. **マージリクエストをオープン** — Fossaが自動的にレビューします
+
+## 得られるもの
+
+- すべてのMRでの自動レビュー
+- マージリクエスト内に直接投稿されるコメント
+- カスタマイズ可能なルールと提案コントロール
+- リンクされたタスクに対するビジネスロジック検証
+
+## カスタム設定
+
+プロジェクトごとの動作をカスタマイズするには、リポジトリルートに `fossa-config.yml` を配置します。
+
+完全なセットアップガイドについては、[GitLab OAuth](/ja/how_to_deploy/platforms/gitlab/gitlab_oauth)と[GitLab Webhook](/ja/how_to_deploy/platforms/gitlab/gitlab_webhook)を参照してください。

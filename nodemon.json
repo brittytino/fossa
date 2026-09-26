@@ -1,0 +1,14 @@
+{
+    "watch": [
+        "libs",
+        "apps"
+    ],
+    "ext": "ts,js,json",
+    "ignore": [
+        "dist",
+        "node_modules",
+        "**/*.spec.ts"
+    ],
+    "signal": "SIGTERM",
+    "delay": "2500"
+}

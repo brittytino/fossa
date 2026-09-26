@@ -1,0 +1,644 @@
+import { createLogger } from '@libs/core/log/logger';
+import { LLM_ERROR_TAG } from '@libs/llm/log-tags';
+import type { NormalizedModel } from '@libs/llm/byok-config';
+import z from 'zod';
+import filteredLibraryFossyRules from '@libs/code-review/infrastructure/data/filtered-rules.json';
+import { Injectable } from '@nestjs/common';
+import { v4 } from 'uuid';
+
+import { LLM_TASK } from '@libs/llm/byok-config';
+import { LLM } from '@libs/llm/llm';
+
+import { SUPPORTED_LANGUAGES } from '@libs/code-review/domain/contracts/SupportedLanguages';
+import { isFossyAuthoredBody } from '@libs/common/utils/fossy-identifiers';
+import {
+    CategorizedComment,
+    UncategorizedComment,
+} from '@libs/code-review/domain/types/commentAnalysis.type';
+import {
+    commentCategorizerSchema,
+    commentIrrelevanceFilterSchema,
+    prompt_CommentCategorizerSystem,
+    prompt_CommentCategorizerUser,
+    prompt_CommentIrrelevanceFilterSystem,
+    prompt_CommentIrrelevanceFilterUser,
+} from '@libs/common/utils/prompts/commentAnalysis';
+import {
+    fossyRulesGeneratorDuplicateFilterSchema,
+    fossyRulesGeneratorQualityFilterSchema,
+    fossyRulesGeneratorSchema,
+    prompt_FossyRulesGeneratorDuplicateFilterSystem,
+    prompt_FossyRulesGeneratorDuplicateFilterUser,
+    prompt_FossyRulesGeneratorQualityFilterSystem,
+    prompt_FossyRulesGeneratorQualityFilterUser,
+    prompt_FossyRulesGeneratorSystem,
+    prompt_FossyRulesGeneratorUser,
+} from '@libs/common/utils/prompts/fossyRulesGenerator';
+import { DocumentationContextItem } from '@libs/core/infrastructure/config/types/general/codeReview.type';
+import { LibraryFossyRule } from '@libs/core/infrastructure/config/types/general/fossyRules.type';
+import { OrganizationAndTeamData } from '@libs/core/infrastructure/config/types/general/organizationAndTeamData';
+import { ObservabilityService } from '@libs/core/log/observability.service';
+import { FossyRuleSeverity } from '@libs/fossyRules/dtos/create-fossy-rule.dto';
+import { PermissionValidationService } from '@libs/shared/infrastructure/permissions';
+import {
+    IFossyRule,
+    FossyRulesStatus,
+} from '@libs/fossyRules/domain/interfaces/fossyRules.interface';
+
+/**
+ * Resolved model selection for a Fossy Rules LLM call. BYOK wins when present;
+ * otherwise `modelOverride` forces the managed trial model (DeepSeek V4 Flash
+ * on Fireworks); both undefined resolves the self-hosted env model. Produced by
+ * `resolveFossyRulesModelPolicy`.
+ */
+export interface FossyRulesModelSelection {
+    byokConfig?: NormalizedModel;
+    modelOverride?: string;
+}
+
+@Injectable()
+export class CommentAnalysisService {
+    private readonly logger = createLogger(CommentAnalysisService.name);
+    constructor(
+        private readonly observabilityService: ObservabilityService,
+        private readonly permissionValidationService: PermissionValidationService,
+    ) {}
+
+    /**
+     * Runs a structured-output LLM call, resolving the model the SAME way the
+     * code-review agents do (see `resolveReviewAgentModel` / model-factory):
+     * `resolveTaskModel(v2Config, LLM_TASK.codeReview, …)` over the org's raw config
+     * — BYOK wins; self-hosted resolves the env model; cloud trial forces the
+     * managed model (DeepSeek V4 Flash on Fireworks) via `modelOverride` (the
+     * default-model override); cloud without BYOK is already skipped upstream by
+     * the model policy. `wrapByokModel` adds the shared concurrency limiter +
+     * error classification. Non-strict structured output so schemas with optional
+     * fields work across providers. LLM failures propagate — callers must not
+     * treat them as "no result".
+     */
+    private async runStructuredLLM<S extends z.ZodType>(args: {
+        organizationAndTeamData: OrganizationAndTeamData;
+        modelConfig: FossyRulesModelSelection;
+        schema: S;
+        system: string;
+        user: string;
+        runName: string;
+        attrs?: Record<string, unknown>;
+    }): Promise<z.infer<S>> {
+        const {
+            organizationAndTeamData,
+            modelConfig,
+            schema,
+            system,
+            user,
+            runName,
+            attrs,
+        } = args;
+
+        // Resolve the routed codeReview slot (org-aware), then run it through the
+        // shared STRUCTURED executor — the same path every other structured review
+        // call uses: BYOK limiter, the slot's tuning + reasoning, the span, the
+        // central strict-wire-schema conversion and the D-00c latency re-issue.
+        // Replaces the hand-rolled resolveTaskModel + wrapByokModel +
+        // tracedGenerateText copy. `modelOverride` (trial default) only applies
+        // when there is no BYOK; off-BYOK yields the env/managed default.
+        const slot = await this.permissionValidationService.resolveTaskSlot(
+            organizationAndTeamData,
+            LLM_TASK.codeReview,
+        );
+
+        // Cast: LLM.run's return is a conditional over `z.ZodType | Schema`;
+        // here `S extends z.ZodType`, so it resolves to `z.infer<S>` — TS just
+        // can't narrow the conditional through the call. observabilityService is
+        // no longer passed: LLM owns the span internally (app singleton).
+        return LLM.run({
+            byokConfig: slot,
+            schema,
+            system,
+            user,
+            runName,
+            spanName: `${CommentAnalysisService.name}::${runName}`,
+            attrs,
+            organizationId: organizationAndTeamData.organizationId,
+            telemetryMetadata: {
+                organizationId: organizationAndTeamData.organizationId,
+                teamId: organizationAndTeamData.teamId,
+            },
+            defaultModelOverride: modelConfig.modelOverride,
+        }) as Promise<z.infer<S>>;
+    }
+
+    async categorizeComments(params: {
+        comments: UncategorizedComment[];
+        organizationAndTeamData: OrganizationAndTeamData;
+    }): Promise<CategorizedComment[]> {
+        const { comments, organizationAndTeamData } = params;
+
+        try {
+            const filteredComments = await this.filterComments({
+                comments,
+                organizationAndTeamData,
+            });
+            if (!filteredComments || filteredComments.length === 0) {
+                this.logger.log({
+                    message: 'No comments after filtering',
+                    context: CommentAnalysisService.name,
+                    metadata: params,
+                });
+                return [];
+            }
+
+            // The codeReview slot is resolved inside runStructuredLLM from the
+            // raw config (native); no legacy byokConfig needed here.
+            const categorizedCommentsRes = await this.runStructuredLLM({
+                organizationAndTeamData,
+                modelConfig: {},
+                schema: commentCategorizerSchema,
+                system: prompt_CommentCategorizerSystem(),
+                user: prompt_CommentCategorizerUser({
+                    comments: filteredComments,
+                }),
+                runName: 'commentCategorizer',
+                attrs: { commentsCount: filteredComments.length },
+            });
+
+            const categorizedComments = categorizedCommentsRes?.suggestions;
+            if (!categorizedComments || categorizedComments.length === 0) {
+                this.logger.log({
+                    message: 'No comments after categorization',
+                    context: CommentAnalysisService.name,
+                    metadata: params,
+                });
+                return [];
+            }
+
+            return this.addBodyToCategorizedComment({
+                oldComments: comments,
+                newComments: categorizedComments,
+            });
+        } catch (error) {
+            this.logger.error({
+                message: `${LLM_ERROR_TAG} Error categorizing comments`,
+                context: CommentAnalysisService.name,
+                error,
+                metadata: params,
+            });
+        }
+    }
+
+    private addBodyToCategorizedComment(params: {
+        oldComments: UncategorizedComment[];
+        newComments: Partial<CategorizedComment>[];
+    }): CategorizedComment[] {
+        try {
+            const { oldComments, newComments } = params;
+
+            return newComments.map((newComment) => {
+                const oldComment = oldComments.find(
+                    (comment) =>
+                        comment.id.toString() === newComment.id.toString(),
+                );
+
+                return {
+                    id: oldComment.id,
+                    body: oldComment.body,
+                    category: newComment.category,
+                    severity: newComment.severity,
+                };
+            });
+        } catch (error) {
+            this.logger.error({
+                message: 'Error adding body to categorized comments',
+                context: CommentAnalysisService.name,
+                error,
+                metadata: params,
+            });
+            return [];
+        }
+    }
+
+    async generateFossyRules(params: {
+        comments: UncategorizedComment[];
+        existingRules: IFossyRule[];
+        organizationAndTeamData: OrganizationAndTeamData;
+        modelConfig?: FossyRulesModelSelection;
+        memories?: Array<Partial<IFossyRule>>;
+        documentationContext?: DocumentationContextItem[];
+    }): Promise<IFossyRule[]> {
+        const {
+            comments,
+            existingRules,
+            organizationAndTeamData,
+            memories,
+            documentationContext,
+        } = params;
+
+        // The use-case/cron pass the policy-resolved selection (its
+        // `modelOverride` still honored). When called without one, the codeReview
+        // slot is resolved inside runStructuredLLM from the raw config.
+        const modelConfig: FossyRulesModelSelection = params.modelConfig ?? {};
+
+        // NOTE: no swallowing try/catch here — an LLM failure must propagate so
+        // the use-case marks the run as errored instead of "0 rules, success".
+        const filteredComments = await this.filterComments({
+            comments,
+            organizationAndTeamData,
+            modelConfig,
+        });
+
+        if (!filteredComments || filteredComments.length === 0) {
+            this.logger.log({
+                message: 'No comments to generate Fossy rules after filtering',
+                context: CommentAnalysisService.name,
+                metadata: { organizationAndTeamData },
+            });
+            return [];
+        }
+
+        const generatedRes = await this.runStructuredLLM({
+            organizationAndTeamData,
+            modelConfig,
+            schema: fossyRulesGeneratorSchema,
+            system: prompt_FossyRulesGeneratorSystem(),
+            user: prompt_FossyRulesGeneratorUser({
+                comments: filteredComments,
+                rules: filteredLibraryFossyRules,
+                memories,
+                documentationContext,
+            }),
+            runName: 'generateFossyRules.generate',
+            attrs: { commentsCount: filteredComments.length },
+        });
+
+        const generated = generatedRes?.rules as Partial<IFossyRule>[];
+
+        if (!generated || generated.length === 0) {
+            this.logger.log({
+                message: 'No rules generated',
+                context: CommentAnalysisService.name,
+                metadata: { organizationAndTeamData },
+            });
+            return [];
+        }
+
+        const generatedWithUuids = generated.map((rule) => ({
+            ...rule,
+            uuid: rule.uuid || v4(),
+        }));
+
+        const existingRulesAsLibrary = existingRules.map((rule) => ({
+            ...rule,
+            why_is_this_important:
+                (rule as Partial<LibraryFossyRule>)?.why_is_this_important || '',
+        })) as LibraryFossyRule[];
+
+        let deduplicatedRules = generatedWithUuids;
+        if (existingRules && existingRules.length > 0) {
+            const deduplicatedRulesUuidsRes = await this.runStructuredLLM({
+                organizationAndTeamData,
+                modelConfig,
+                schema: fossyRulesGeneratorDuplicateFilterSchema,
+                system: prompt_FossyRulesGeneratorDuplicateFilterSystem(),
+                user: prompt_FossyRulesGeneratorDuplicateFilterUser({
+                    existingRules: existingRulesAsLibrary,
+                    newRules: generatedWithUuids,
+                }),
+                runName: 'generateFossyRules.dedupe',
+                attrs: {
+                    newRulesCount: generatedWithUuids.length,
+                    existingRulesCount: existingRulesAsLibrary.length,
+                },
+            });
+
+            const deduplicatedRulesUuids = deduplicatedRulesUuidsRes?.uuids;
+
+            if (!deduplicatedRulesUuids || deduplicatedRulesUuids.length === 0) {
+                this.logger.log({
+                    message: 'No rules after deduplication',
+                    context: CommentAnalysisService.name,
+                    metadata: { organizationAndTeamData },
+                });
+                return [];
+            }
+
+            deduplicatedRules = this.mapRuleUuidToRule({
+                rules: generatedWithUuids,
+                uuids: deduplicatedRulesUuids,
+            });
+        }
+
+        const filteredRulesUuidsRes = await this.runStructuredLLM({
+            organizationAndTeamData,
+            modelConfig,
+            schema: fossyRulesGeneratorQualityFilterSchema,
+            system: prompt_FossyRulesGeneratorQualityFilterSystem(),
+            user: prompt_FossyRulesGeneratorQualityFilterUser({
+                rules: deduplicatedRules,
+            }),
+            runName: 'generateFossyRules.quality',
+            attrs: { candidateRulesCount: deduplicatedRules.length },
+        });
+
+        const filteredRulesUuids = filteredRulesUuidsRes?.uuids;
+
+        if (!filteredRulesUuids || filteredRulesUuids.length === 0) {
+            this.logger.log({
+                message: 'No rules after quality filter',
+                context: CommentAnalysisService.name,
+                metadata: { organizationAndTeamData },
+            });
+            return [];
+        }
+
+        const filteredRules = this.mapRuleUuidToRule({
+            rules: deduplicatedRules,
+            uuids: filteredRulesUuids,
+        });
+
+        return this.standardizeRules({ rules: filteredRules });
+    }
+
+    private mapRuleUuidToRule(params: {
+        rules: Array<Omit<Partial<IFossyRule>, 'uuid'> & { uuid: string }>;
+        uuids: string[];
+    }) {
+        const { rules, uuids } = params;
+
+        return rules.filter((rule) => uuids.includes(rule.uuid));
+    }
+
+    private standardizeRules(params: {
+        rules: Partial<IFossyRule>[];
+    }): IFossyRule[] {
+        try {
+            const { rules } = params;
+
+            const filteredFossyRulesUuids = new Set(
+                filteredLibraryFossyRules.map((rule) => rule.uuid),
+            );
+
+            const standardizedRules = rules.map((rule) => {
+                if (!filteredFossyRulesUuids.has(rule.uuid)) {
+                    rule.uuid = '';
+                }
+                return rule;
+            });
+
+            return standardizedRules.map((rule) => ({
+                uuid: rule.uuid || '',
+                title: rule.title || '',
+                rule: rule.rule || '',
+                severity: rule.severity || FossyRuleSeverity.LOW,
+                examples: rule.examples || [],
+                repositoryId: 'global',
+                status: FossyRulesStatus.PENDING,
+            }));
+        } catch (error) {
+            this.logger.error({
+                message: 'Error standardizing rules',
+                context: CommentAnalysisService.name,
+                error,
+                metadata: params,
+            });
+            return [];
+        }
+    }
+
+    private async filterComments(params: {
+        comments: UncategorizedComment[];
+        organizationAndTeamData: OrganizationAndTeamData;
+        modelConfig?: FossyRulesModelSelection;
+    }): Promise<UncategorizedComment[]> {
+        const { comments, organizationAndTeamData } = params;
+
+        // Resolved inside runStructuredLLM from the raw config when no
+        // policy-resolved selection is passed (native).
+        const modelConfig: FossyRulesModelSelection = params.modelConfig ?? {};
+
+        // No swallowing catch — a provider failure must propagate so the run
+        // is marked errored. An empty result (no relevant comments) is a
+        // legitimate outcome and returns [], distinct from a failure.
+        const filteredCommentsIdsRes = await this.runStructuredLLM({
+            organizationAndTeamData,
+            modelConfig,
+            schema: commentIrrelevanceFilterSchema,
+            system: prompt_CommentIrrelevanceFilterSystem(),
+            user: prompt_CommentIrrelevanceFilterUser({ comments }),
+            runName: 'commentIrrelevanceFilter',
+            attrs: { commentsCount: comments.length },
+        });
+
+        const filteredCommentsIds = filteredCommentsIdsRes?.ids;
+
+        if (!filteredCommentsIds || filteredCommentsIds.length === 0) {
+            this.logger.log({
+                message: 'No relevant comments after irrelevance filter',
+                context: CommentAnalysisService.name,
+                metadata: { organizationAndTeamData },
+            });
+            return [];
+        }
+
+        return comments.filter((comment) =>
+            filteredCommentsIds.includes(comment.id.toString()),
+        );
+    }
+
+    private getPercentages<T>(count: T, total: number) {
+        return Object.fromEntries(
+            Object.entries(count).map(([key, value]) => [
+                key,
+                total > 0 ? value / total : 0,
+            ]),
+        ) as T;
+    }
+
+    processComments(
+        comments: {
+            pr: any;
+            generalComments: any[];
+            reviewComments: any[];
+            files?: any[];
+        }[],
+        // Provider-native user ids whose comments must be dropped before
+        // learning (issue #1497). Denylist — empty/undefined keeps everyone.
+        excludedReviewerIds?: Set<string>,
+    ) {
+        const hasExclusions = !!excludedReviewerIds && excludedReviewerIds.size > 0;
+
+        const processedComments = comments
+            .map((pr) => {
+                const allComments = [
+                    ...pr.generalComments,
+                    ...pr.reviewComments,
+                ];
+
+                const mappedComments = allComments.flatMap((comment) => {
+                    if (!('body' in comment)) {
+                        // GitLab discussion notes. Carry `author` so the
+                        // reviewer-exclusion filter below can identify them —
+                        // GitLab keys the author on `author`, not `user`.
+                        return comment.notes.flatMap((note) => ({
+                            id: note.id,
+                            body: note.body,
+                            author: note.author,
+                        }));
+                    }
+
+                    if (comment?.threadId) {
+                        // Azure DevOps: ensure unique ID
+                        return {
+                            ...comment,
+                            id: `${comment.threadId}-${comment.id}`, // composite ID
+                        };
+                    }
+                    return comment;
+                });
+
+                const uniqueComments = [];
+                const seenIds = new Set();
+
+                for (const comment of mappedComments) {
+                    if (!seenIds.has(comment.id)) {
+                        seenIds.add(comment.id);
+                        uniqueComments.push(comment);
+                    }
+                }
+
+                const filteredComments = uniqueComments
+                    ?.filter(
+                        (comment) =>
+                            !comment?.user ||
+                            !comment?.user?.type ||
+                            comment?.user?.type?.toLowerCase() !== 'bot',
+                    )
+                    ?.filter(
+                        // Drop comments authored by Fossy itself — otherwise
+                        // the rule-generator LLM learns from Fossy's own
+                        // past reviews and creates duplicate rules on
+                        // subsequent onboardings (self-feedback loop).
+                        // Both provider signatures are checked centrally
+                        // via `isFossyAuthoredBody` — see
+                        // `libs/common/utils/fossy-identifiers.ts` for why
+                        // bitbucket needs a different marker form than
+                        // github / gitlab / azure / forgejo.
+                        (comment) => !isFossyAuthoredBody(comment?.body),
+                    )
+                    ?.filter((comment) => {
+                        // Reviewer denylist (issue #1497): drop comments from
+                        // excluded git users. Keep when we can't identify the
+                        // author, so a denylist never silently removes an
+                        // unidentifiable reviewer's comments.
+                        if (!hasExclusions) {
+                            return true;
+                        }
+                        const authorId = this.getCommentAuthorId(comment);
+                        return !authorId || !excludedReviewerIds.has(authorId);
+                    })
+                    ?.filter((comment) => comment?.body?.length > 100);
+
+                let finalComments = filteredComments;
+                if (pr.files && pr.files.length > 0) {
+                    const fileExtensionFrequency =
+                        this.fileExtensionFrequencyAnalysis(pr.files);
+
+                    if (!fileExtensionFrequency) {
+                        return null;
+                    }
+
+                    const sortedExtensions = Object.entries(
+                        fileExtensionFrequency,
+                    )
+                        .sort(
+                            (
+                                [_, a]: [string, number],
+                                [__, b]: [string, number],
+                            ) => b - a,
+                        )
+                        .map(([ext, _]) => ext);
+
+                    const supportedLanguageConfig = Object.values(
+                        SUPPORTED_LANGUAGES,
+                    ).find((lang) =>
+                        lang.extensions.some((ext) =>
+                            sortedExtensions.includes(ext.slice(1)),
+                        ),
+                    );
+
+                    if (supportedLanguageConfig) {
+                        finalComments = finalComments.map((comment) => ({
+                            ...comment,
+                            language: supportedLanguageConfig.name,
+                        }));
+                    }
+                }
+
+                return {
+                    pr: pr.pr,
+                    comments: finalComments,
+                };
+            })
+            .filter((pr) => pr.comments.length > 0) // Remove PRs with no comments
+            .flatMap((pr) => pr.comments)
+            .slice(0, 100);
+
+        if (processedComments.length === 0) {
+            this.logger.log({
+                message: 'No valid comments found after processing',
+                context: CommentAnalysisService.name,
+            });
+            return [];
+        }
+
+        if (processedComments.length < 20) {
+            this.logger.log({
+                message:
+                    'Less than 20 valid comments found after processing, results quality may be affected',
+                context: CommentAnalysisService.name,
+                metadata: processedComments,
+            });
+        }
+
+        return processedComments;
+    }
+
+    /**
+     * Provider-native author id of a raw review comment, as a string, for
+     * matching against the reviewer denylist. GitHub/Azure key the author on
+     * `user`, GitLab on `author`; ids are numeric on GitHub/GitLab and a GUID
+     * on Azure, so everything is normalized to string. Returns undefined when
+     * the author can't be identified.
+     */
+    private getCommentAuthorId(comment: any): string | undefined {
+        const rawId = comment?.user?.id ?? comment?.author?.id;
+        if (rawId === undefined || rawId === null || rawId === '') {
+            return undefined;
+        }
+        return String(rawId);
+    }
+
+    private fileExtensionFrequencyAnalysis(files: { filename: string }[]) {
+        try {
+            const total = files.length;
+
+            const count = files.reduce<Record<string, number>>(
+                (acc, file) => {
+                    const extension = file.filename.split('.').pop();
+                    acc[extension] = (acc[extension] || 0) + 1;
+                    return acc;
+                },
+                {},
+            );
+
+            return this.getPercentages(count, total);
+        } catch (error) {
+            this.logger.error({
+                message: 'Error analyzing frequency',
+                context: CommentAnalysisService.name,
+                error,
+                metadata: files,
+            });
+            return null;
+        }
+    }
+}

@@ -1,0 +1,1105 @@
+import { createLogger } from '@libs/core/log/logger';
+import { LLM } from '@libs/llm/llm';
+import { extractJsonFromText } from '@libs/llm/structured-output-repair';
+import { LLM_ERROR_TAG, LLM_ENVELOPE_TAG } from '@libs/llm/log-tags';
+import { PromptRole } from '@libs/llm/prompt-role';
+import { getModelName } from '@libs/llm/byok-to-vercel';
+import type { NormalizedModel } from '@libs/llm/byok-config';
+import { Inject, Injectable } from '@nestjs/common';
+import { randomUUID } from 'crypto';
+import { z } from 'zod';
+
+import {
+    CreateSandboxParams,
+    SandboxInstance,
+} from '@libs/sandbox/domain/contracts/sandbox.provider';
+import {
+    ISandboxLeaseManager,
+    SANDBOX_LEASE_MANAGER_TOKEN,
+} from '@libs/sandbox/domain/contracts/sandbox-lease-manager.contract';
+import {
+    CrossFileContextSnippet,
+    RemoteCommands,
+} from '@libs/code-review/infrastructure/adapters/services/collectCrossFileContexts.service';
+import { DocumentationSearchExaService } from '@libs/code-review/infrastructure/adapters/services/documentation-search-exa.service';
+import {
+    TriageDecision,
+    triageSuggestion,
+} from '@libs/code-review/infrastructure/adapters/services/safeguardTriage.service';
+import { DocumentationQueryPlanByFile } from '@libs/code-review/pipeline/context/code-review-pipeline.context';
+import {
+    SAFEGUARD_CROSS_FILE_CONTEXT_PREAMBLE,
+    formatMemoriesSection,
+    formatReferenceSection,
+    formatSyncErrors,
+} from '@libs/common/utils/prompts/codeReviewSafeguard';
+import {
+    STRUCTURAL_DEFECT_FEATURES,
+    SafeguardFeatureExtractionResult,
+    SafeguardFeatureSet,
+    prompt_codeReviewSafeguard_featureExtraction,
+} from '@libs/common/utils/prompts/codeReviewSafeguardFeatures';
+import { prompt_codeReviewSafeguard_verification } from '@libs/common/utils/prompts/codeReviewSafeguardVerification';
+import { ReviewModeResponse } from '@libs/core/domain/enums/code-review.enum';
+import {
+    DocumentationContextItem,
+    ISafeguardResponse,
+} from '@libs/core/infrastructure/config/types/general/codeReview.type';
+import { OrganizationAndTeamData } from '@libs/core/infrastructure/config/types/general/organizationAndTeamData';
+import { ObservabilityService } from '@libs/core/log/observability.service';
+
+interface SafeguardPipelineParams {
+    organizationAndTeamData: OrganizationAndTeamData;
+    prNumber: number;
+    file: any;
+    relevantContent: string;
+    codeDiff: string;
+    suggestions: any[];
+    languageResultPrompt: string;
+    reviewMode: ReviewModeResponse;
+    byokConfig: NormalizedModel;
+    crossFileSnippets?: CrossFileContextSnippet[];
+    remoteCommands?: RemoteCommands;
+    memories?: Array<Partial<{ title?: string; rule?: string }>>;
+    externalReferences?: unknown[];
+    externalReferenceErrors?: unknown[] | string;
+    getFreshCloneParams?: () => Promise<CreateSandboxParams>;
+    documentationContext?: DocumentationContextItem[];
+}
+
+const MAX_AGENT_TURNS = 6;
+
+// The lease manager's own default (30 min) is sized for a PR-review
+// sandbox, but this renewal happens mid-pipeline and its lease must
+// outlive the REST of the safeguard run, not just its own creation — the
+// reaper kills any lease past its expiresAt regardless of leaseCount, so
+// the default risks killing the renewed sandbox mid-verification on a
+// long-running safeguard pass. Give it the same ceiling as the graph-build
+// consumers.
+const SAFEGUARD_RENEWAL_LEASE_TTL_MS = 2 * 60 * 60 * 1000; // 2h
+
+// Boolean feature matrix extracted per suggestion in `extractFeatures`. Hoisted
+// to module scope so the strict-wire governance suite can assert it stays
+// OpenAI-strict compatible.
+export const safeguardFeatureExtractionSchema = z.object({
+    codeSuggestions: z.array(
+        z.object({
+            id: z.string(),
+            features: z.object({
+                has_resource_leak: z.boolean(),
+                has_inconsistent_contract: z.boolean(),
+                has_wrong_algorithm: z.boolean(),
+                has_data_exposure: z.boolean(),
+                has_missing_error_handling: z.boolean(),
+                has_redundant_work_in_loop: z.boolean(),
+                has_unsafe_data_flow: z.boolean(),
+                requires_assumed_input: z.boolean(),
+                requires_assumed_workload: z.boolean(),
+                is_quality_opinion: z.boolean(),
+                is_anti_pattern_only: z.boolean(),
+                targets_unchanged_code: z.boolean(),
+                improvedCode_is_correct: z.boolean(),
+            }),
+        }),
+    ),
+});
+
+// Prompt-only refute-to-drop verdict for an ambiguous suggestion. Hoisted to
+// module scope for the same strict-wire coverage reason.
+export const safeguardVerificationSchema = z.object({
+    verdict: z.boolean(),
+    evidence: z.string(),
+});
+
+// Each agent turn emits EITHER a tool call or a final verdict. All fields
+// are optional (the strict-wire converter makes absent ones nullable and
+// strips the nulls back to absent on parse), so the parsed object carries
+// ONLY the keys the model actually filled — `'verdict' in parsed` keeps
+// discriminating tool-calls from verdicts exactly as the STRING path did.
+export const agentTurnSchema = z.object({
+    tool: z.string().optional(),
+    pattern: z.string().optional(),
+    path: z.string().optional(),
+    packageName: z.string().optional(),
+    query: z.string().optional(),
+    verdict: z.boolean().optional(),
+    action: z.string().optional(),
+    evidence: z.string().optional(),
+});
+
+@Injectable()
+export class SafeguardPipelineService {
+    private readonly logger = createLogger(SafeguardPipelineService.name);
+
+    constructor(
+        private readonly observability: ObservabilityService,
+        @Inject(SANDBOX_LEASE_MANAGER_TOKEN)
+        private readonly leaseManager: ISandboxLeaseManager,
+        private readonly documentationSearchExaService: DocumentationSearchExaService,
+    ) {}
+
+    async execute(
+        params: SafeguardPipelineParams,
+    ): Promise<ISafeguardResponse> {
+        const {
+            organizationAndTeamData,
+            prNumber,
+            file,
+            suggestions,
+            byokConfig,
+            remoteCommands,
+        } = params;
+
+        const pipelineStart = Date.now();
+        const fileLabel = file?.filename || 'unknown';
+
+        try {
+            // Step 1: Feature Extraction (batch — one LLM call for all suggestions in the file)
+            const feStart = Date.now();
+            const featureResult = await this.extractFeatures(params);
+            const feMs = Date.now() - feStart;
+
+            if (!featureResult?.codeSuggestions?.length) {
+                this.logger.warn({
+                    message: `No features extracted for PR#${prNumber} file ${file?.filename}`,
+                    context: SafeguardPipelineService.name,
+                });
+                this.logger.log({
+                    message: `[TIMING] PR#${prNumber} ${fileLabel} — Feature Extraction: ${(feMs / 1000).toFixed(1)}s (no features) | Total: ${((Date.now() - pipelineStart) / 1000).toFixed(1)}s`,
+                    context: SafeguardPipelineService.name,
+                });
+                return {
+                    suggestions,
+                    codeReviewModelUsed: { safeguard: getModelName(byokConfig) },
+                };
+            }
+
+            // Build lookup map: suggestion id → features
+            const featuresById = new Map<string, SafeguardFeatureSet>();
+            for (const item of featureResult.codeSuggestions) {
+                if (item.id && item.features) {
+                    featuresById.set(item.id, item.features);
+                }
+            }
+
+            // Step 2: Triage (deterministic — per suggestion)
+            const kept: any[] = [];
+            const toVerify: Array<{
+                suggestion: any;
+                features: SafeguardFeatureSet;
+            }> = [];
+            let discardedCount = 0;
+
+            for (const suggestion of suggestions) {
+                const features = featuresById.get(suggestion.id);
+                if (!features) {
+                    // No features extracted — keep suggestion as-is (safe default)
+                    this.logger.log({
+                        message: `[TRIAGE] PR#${prNumber} ${fileLabel} — suggestion "${suggestion.label || suggestion.id}" (${suggestion.severity}): no features → keep (default)`,
+                        context: SafeguardPipelineService.name,
+                    });
+                    kept.push(suggestion);
+                    continue;
+                }
+
+                const decision: TriageDecision = triageSuggestion(features);
+
+                this.logger.log({
+                    message: `[TRIAGE] PR#${prNumber} ${fileLabel} — suggestion "${suggestion.label || suggestion.id}" (${suggestion.severity}): decision=${decision} | features: ${JSON.stringify(features)}`,
+                    context: SafeguardPipelineService.name,
+                });
+
+                if (decision === 'keep') {
+                    // Handle improvedCode correctness
+                    if (features.improvedCode_is_correct === false) {
+                        kept.push({ ...suggestion, improvedCode: null });
+                    } else {
+                        kept.push(suggestion);
+                    }
+                } else if (decision === 'discard') {
+                    // Discarded — do not include in output
+                    discardedCount++;
+                    continue;
+                } else {
+                    // 'verify' — needs agent investigation
+                    toVerify.push({ suggestion, features });
+                }
+            }
+
+            this.logger.log({
+                message: `[TIMING] PR#${prNumber} ${fileLabel} — Feature Extraction: ${(feMs / 1000).toFixed(1)}s | Triage: ${kept.length} kept, ${discardedCount} discarded, ${toVerify.length} verify (of ${suggestions.length} total)`,
+                context: SafeguardPipelineService.name,
+            });
+
+            // Step 3: Agent Verification (per suggestion that needs it)
+            if (toVerify.length > 0 && remoteCommands) {
+                this.logger.log({
+                    message: `[SAFEGUARD_DECISION] PR#${prNumber} ${fileLabel} — using agent verification with sandbox`,
+                    context: SafeguardPipelineService.name,
+                    metadata: {
+                        safeguardMode: 'agent_verification',
+                        sandboxAvailable: true,
+                        safeguardReason: 'remote_commands_available',
+                        prNumber,
+                        filePath: file?.filename,
+                        toVerifyCount: toVerify.length,
+                        hasFreshCloneParams: !!params.getFreshCloneParams,
+                    },
+                });
+
+                const agentStart = Date.now();
+                let agentKept = 0;
+                let agentDiscarded = 0;
+                let totalTurns = 0;
+
+                let currentRemoteCommands = remoteCommands;
+                let renewedCleanup: (() => Promise<void>) | undefined;
+
+                const canRenew = !!(
+                    params.getFreshCloneParams && this.leaseManager
+                );
+                this.logger.log({
+                    message: `[SAFEGUARD] PR#${prNumber} ${fileLabel} — Agent verification starting: ${toVerify.length} suggestions to verify, sandbox renewal ${canRenew ? 'available' : 'NOT available'}${!params.getFreshCloneParams ? ' (no getFreshCloneParams)' : ''}${!this.leaseManager ? ' (no leaseManager)' : ''}`,
+                    context: SafeguardPipelineService.name,
+                });
+
+                // Closure to attempt sandbox renewal; returns true on success
+                const tryRenewSandbox = async (): Promise<boolean> => {
+                    if (!params.getFreshCloneParams || !this.leaseManager) {
+                        this.logger.warn({
+                            message: `[SAFEGUARD] PR#${prNumber} ${fileLabel} — Cannot renew sandbox: ${!params.getFreshCloneParams ? 'getFreshCloneParams is missing' : 'leaseManager is missing'}`,
+                            context: SafeguardPipelineService.name,
+                        });
+                        return false;
+                    }
+                    let newSandbox: SandboxInstance | undefined;
+                    try {
+                        const freshCloneParams =
+                            await params.getFreshCloneParams();
+                        // Routed through the lease manager (not the raw
+                        // provider) so a worker crash mid-verification leaves
+                        // a lease doc the existing 30min TTL + 5min reaper
+                        // cron already cleans up. The prKey is unique per
+                        // renewal attempt (randomUUID suffix), so this always
+                        // takes the creator path — it deliberately does NOT
+                        // reuse the PR's own review lease (that sandbox may be
+                        // the stale one being replaced).
+                        const renewPrKey = `${organizationAndTeamData?.organizationId}:safeguard-renew:${prNumber}:${randomUUID()}`;
+                        const acquired = await this.leaseManager.acquire(
+                            renewPrKey,
+                            'safeguard-renewal',
+                            SAFEGUARD_RENEWAL_LEASE_TTL_MS,
+                            freshCloneParams,
+                        );
+                        newSandbox = acquired.sandbox;
+                        currentRemoteCommands = newSandbox.remoteCommands;
+                        if (renewedCleanup)
+                            await renewedCleanup().catch(() => {});
+                        renewedCleanup = newSandbox.cleanup;
+                        this.logger.log({
+                            message: `Sandbox renewed for PR#${prNumber} ${fileLabel}`,
+                            context: SafeguardPipelineService.name,
+                        });
+                        return true;
+                    } catch (renewErr) {
+                        this.logger.warn({
+                            message: `Sandbox renewal failed for PR#${prNumber} ${fileLabel}, stopping agent verification`,
+                            context: SafeguardPipelineService.name,
+                            error: renewErr,
+                        });
+                        // Clean up the new sandbox if it was created but setup failed after
+                        if (newSandbox?.cleanup) {
+                            await newSandbox.cleanup().catch(() => {});
+                        }
+                        return false;
+                    }
+                };
+
+                let stopLoop = false;
+
+                for (const { suggestion, features } of toVerify) {
+                    if (stopLoop) break;
+
+                    const suggStart = Date.now();
+                    let result:
+                        | {
+                              action: string;
+                              evidence: string;
+                              turnsUsed: number;
+                          }
+                        | undefined;
+                    let sandboxError = false;
+
+                    // First attempt
+                    try {
+                        result = await this.verifyWithAgent(
+                            suggestion,
+                            features,
+                            currentRemoteCommands,
+                            params.languageResultPrompt,
+                            organizationAndTeamData,
+                            prNumber,
+                            params.memories,
+                            params.documentationContext,
+                            byokConfig,
+                        );
+
+                        if (
+                            result.action !== 'no_changes' &&
+                            this.isSandboxRelatedEvidence(result.evidence)
+                        ) {
+                            sandboxError = true;
+                        }
+                    } catch (error) {
+                        sandboxError = this.isSandboxDeadError(error);
+                        if (!sandboxError) {
+                            // Non-sandbox error — discard and move on
+                            this.logger.warn({
+                                message: `${LLM_ERROR_TAG} Agent verification failed for suggestion ${suggestion.id}, discarding (safe default)`,
+                                context: SafeguardPipelineService.name,
+                                error,
+                            });
+                            agentDiscarded++;
+                            continue;
+                        }
+                    }
+
+                    // If sandbox died, renew and retry this same suggestion
+                    if (sandboxError) {
+                        this.logger.warn({
+                            message: `[SAFEGUARD] Sandbox dead detected for suggestion ${suggestion.id} in PR#${prNumber} ${fileLabel}, attempting renewal | First attempt evidence: ${(result?.evidence || 'N/A (exception)').substring(0, 200)}`,
+                            context: SafeguardPipelineService.name,
+                        });
+
+                        if (!(await tryRenewSandbox())) {
+                            agentDiscarded++;
+                            stopLoop = true;
+                            continue;
+                        }
+
+                        // Retry with the renewed sandbox
+                        try {
+                            result = await this.verifyWithAgent(
+                                suggestion,
+                                features,
+                                currentRemoteCommands,
+                                params.languageResultPrompt,
+                                organizationAndTeamData,
+                                prNumber,
+                                params.memories,
+                                undefined,
+                                byokConfig,
+                            );
+                        } catch (retryError) {
+                            this.logger.warn({
+                                message: `${LLM_ERROR_TAG} Agent verification retry failed for suggestion ${suggestion.id} after sandbox renewal, discarding`,
+                                context: SafeguardPipelineService.name,
+                                error: retryError,
+                            });
+                            agentDiscarded++;
+                            // If retry also fails with sandbox error, stop entirely
+                            if (this.isSandboxDeadError(retryError)) {
+                                stopLoop = true;
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Process result
+                    const suggMs = Date.now() - suggStart;
+                    const wasRetry = sandboxError; // sandboxError means this result came from a retry
+
+                    if (result.action === 'no_changes') {
+                        if (features.improvedCode_is_correct === false) {
+                            kept.push({
+                                ...suggestion,
+                                improvedCode: null,
+                            });
+                        } else {
+                            kept.push(suggestion);
+                        }
+                        agentKept++;
+                    } else {
+                        agentDiscarded++;
+                    }
+
+                    this.logger.log({
+                        message: `[TIMING] PR#${prNumber} ${fileLabel} — Agent verified suggestion ${suggestion.id}: ${result.action}${wasRetry ? ' (after sandbox renewal)' : ''} in ${(suggMs / 1000).toFixed(1)}s (${result.turnsUsed}/${MAX_AGENT_TURNS} turns) | Evidence: ${(result.evidence || '').substring(0, 120)}`,
+                        context: SafeguardPipelineService.name,
+                    });
+                    totalTurns += result.turnsUsed;
+                }
+
+                // Cleanup renewed sandbox
+                if (renewedCleanup) {
+                    await renewedCleanup().catch(() => {});
+                }
+
+                const agentMs = Date.now() - agentStart;
+                this.logger.log({
+                    message: `[TIMING] PR#${prNumber} ${fileLabel} — Agent Verification: ${(agentMs / 1000).toFixed(1)}s (${toVerify.length} suggestions, ${agentKept} kept, ${agentDiscarded} discarded, ${totalTurns} total turns, avg ${(agentMs / toVerify.length / 1000).toFixed(1)}s each)`,
+                    context: SafeguardPipelineService.name,
+                });
+            } else if (toVerify.length > 0 && !remoteCommands) {
+                this.logger.log({
+                    message: `[SAFEGUARD_DECISION] PR#${prNumber} ${fileLabel} — falling back to prompt-only verification`,
+                    context: SafeguardPipelineService.name,
+                    metadata: {
+                        safeguardMode: 'prompt_only',
+                        sandboxAvailable: false,
+                        safeguardReason: 'no_remote_commands',
+                        prNumber,
+                        filePath: file?.filename,
+                        toVerifyCount: toVerify.length,
+                        hasFreshCloneParams: !!params.getFreshCloneParams,
+                    },
+                });
+
+                // No sandbox available — fallback to prompt-only verification
+                const fallbackStart = Date.now();
+                let fallbackKept = 0;
+                let fallbackDiscarded = 0;
+
+                for (const { suggestion, features } of toVerify) {
+                    try {
+                        const result = await this.verifyWithPromptOnly(
+                            suggestion,
+                            features,
+                            params,
+                        );
+
+                        if (result.keep) {
+                            if (features.improvedCode_is_correct === false) {
+                                kept.push({
+                                    ...suggestion,
+                                    improvedCode: null,
+                                });
+                            } else {
+                                kept.push(suggestion);
+                            }
+                            fallbackKept++;
+                        } else {
+                            fallbackDiscarded++;
+                        }
+                    } catch (error) {
+                        this.logger.warn({
+                            message: `${LLM_ERROR_TAG} Prompt-only verification failed for suggestion ${suggestion.id}, keeping (safe default)`,
+                            context: SafeguardPipelineService.name,
+                            error,
+                        });
+                        if (features.improvedCode_is_correct === false) {
+                            kept.push({ ...suggestion, improvedCode: null });
+                        } else {
+                            kept.push(suggestion);
+                        }
+                        fallbackKept++;
+                    }
+                }
+
+                const fallbackMs = Date.now() - fallbackStart;
+                this.logger.log({
+                    message: `[TIMING] PR#${prNumber} ${fileLabel} — Prompt-only Verification (no sandbox): ${(fallbackMs / 1000).toFixed(1)}s (${toVerify.length} suggestions, ${fallbackKept} kept, ${fallbackDiscarded} discarded)`,
+                    context: SafeguardPipelineService.name,
+                });
+            }
+
+            this.logger.log({
+                message: `[TIMING] PR#${prNumber} ${fileLabel} — Pipeline Total: ${((Date.now() - pipelineStart) / 1000).toFixed(1)}s | Input: ${suggestions.length} suggestions → Output: ${kept.length} kept`,
+                context: SafeguardPipelineService.name,
+            });
+
+            return {
+                suggestions: kept,
+                codeReviewModelUsed: {
+                    safeguard: getModelName(byokConfig),
+                },
+            };
+        } catch (error) {
+            this.logger.error({
+                message: `${LLM_ERROR_TAG} Safeguard pipeline failed for PR#${prNumber} file ${file?.filename}, returning all suggestions (${((Date.now() - pipelineStart) / 1000).toFixed(1)}s)`,
+                context: SafeguardPipelineService.name,
+                error,
+            });
+            return {
+                suggestions,
+                codeReviewModelUsed: { safeguard: getModelName(byokConfig) },
+            };
+        }
+    }
+
+    /**
+     * Step 1: Extract boolean features for each suggestion using a single LLM call.
+     */
+    private async extractFeatures(
+        params: SafeguardPipelineParams,
+    ): Promise<SafeguardFeatureExtractionResult> {
+        const {
+            organizationAndTeamData,
+            prNumber,
+            file,
+            relevantContent,
+            codeDiff,
+            suggestions,
+            languageResultPrompt,
+            crossFileSnippets,
+            byokConfig,
+        } = params;
+
+        const runName = 'safeguardFeatureExtraction';
+
+        const schema = safeguardFeatureExtractionSchema;
+
+        const systemPrompt = prompt_codeReviewSafeguard_featureExtraction({
+            languageResultPrompt,
+        });
+
+        const userPrompt = this.buildUserPrompt({
+            fileContent: file?.fileContent,
+            relevantContent,
+            patchWithLinesStr: codeDiff,
+            filePath: file?.filename,
+            suggestions,
+            crossFileSnippets,
+            memories: params.memories,
+            externalReferences: params.externalReferences,
+            externalReferenceErrors: params.externalReferenceErrors,
+        });
+
+        // Migrated off the legacy LangChain PromptRunner onto the AI SDK
+        // path (REQ-NOLC-01). Single span via runStructuredReviewCall — the outer
+        // runLLMInSpan wrapper is dropped (Q4). The BYOK org keeps its own model.
+        // runStructuredReviewCall validates against `schema` internally, so the
+        // trailing safeParse is unnecessary; a parse/LLM failure throws and we
+        // keep the original safe default (return no features → keep all).
+        try {
+            return await LLM.run({
+                schema,
+                system: systemPrompt,
+                user: userPrompt,
+                runName,
+                organizationId: organizationAndTeamData?.organizationId,
+                byokConfig,
+                attrs: {
+                    organizationId: organizationAndTeamData?.organizationId,
+                    prNumber,
+                    file: { filePath: file?.filename },
+                },
+            });
+        } catch (error) {
+            this.logger.warn({
+                message: `${LLM_ERROR_TAG} ${LLM_ENVELOPE_TAG} Feature extraction parse failed for PR#${prNumber}`,
+                context: SafeguardPipelineService.name,
+                metadata: {
+                    error: error instanceof Error ? error.message : String(error),
+                },
+            });
+            return { codeSuggestions: [] };
+        }
+    }
+
+    /**
+     * Prompt-only fallback when no sandbox is available.
+     * Single LLM call using only the context already in hand
+     * (diff, file content, cross-file snippets).
+     */
+    private async verifyWithPromptOnly(
+        suggestion: any,
+        features: SafeguardFeatureSet,
+        params: SafeguardPipelineParams,
+    ): Promise<{ keep: boolean; evidence: string }> {
+        const claimedDefects = STRUCTURAL_DEFECT_FEATURES.filter(
+            (f) => features[f],
+        ).join(', ');
+
+        const schema = safeguardVerificationSchema;
+
+        const systemPrompt = `You are a code review verification assistant. A suggestion was flagged as ambiguous by triage and needs a final decision.
+
+You do NOT have access to the full codebase — only the diff, the file content, and any cross-file snippets provided below. Decide based ONLY on what you can see.
+
+## Rules (refute-to-drop: keep is the default)
+- Your job is to try to REFUTE the finding using ONLY the visible context.
+- If the visible context concretely DISPROVES the defect (the guard is present, the path is unreachable, the syntax is actually correct) → verdict: false (discard)
+- Otherwise → verdict: true (keep). This includes: the defect is plausibly visible, the context is insufficient to disprove it, or you are uncertain.
+- Do NOT discard merely because confirming would need code not shown here, or because the harm is "theoretical" — those are not refutations. Only discard with concrete refuting evidence from the visible context.
+
+## Suggestion Under Review
+**File**: ${suggestion.filePath || params.file?.filename || 'unknown'}
+**Claimed defect**: ${claimedDefects}
+**Suggestion**: ${suggestion.suggestionContent || ''}
+**Code in question**:
+\`\`\`
+${suggestion.existingCode || ''}
+\`\`\`
+
+Respond with JSON only: {"verdict": true/false, "evidence": "brief reason"}
+Evidence field in ${params.languageResultPrompt}.`;
+
+        const userPrompt = this.buildUserPrompt({
+            fileContent: params.file?.fileContent,
+            relevantContent: params.relevantContent,
+            patchWithLinesStr: params.codeDiff,
+            filePath: params.file?.filename,
+            suggestions: [suggestion],
+            crossFileSnippets: params.crossFileSnippets,
+            memories: params.memories,
+            externalReferences: params.externalReferences,
+            externalReferenceErrors: params.externalReferenceErrors,
+        });
+
+        const runName = 'safeguardPromptOnlyVerification';
+
+        // Migrated off the legacy LangChain PromptRunner onto the AI SDK
+        // path (REQ-NOLC-01). Single span via runStructuredReviewCall — the outer
+        // runLLMInSpan wrapper is dropped (Q4). The BYOK org keeps its own model.
+        // runStructuredReviewCall validates against `schema` internally; a parse
+        // or LLM failure throws and we keep the suggestion (the same safe default
+        // the old safeParse-fail branch produced).
+        try {
+            const result = await LLM.run({
+                schema,
+                system: systemPrompt,
+                user: userPrompt,
+                runName,
+                organizationId: params.organizationAndTeamData?.organizationId,
+                byokConfig: params.byokConfig,
+                attrs: {
+                    organizationId:
+                        params.organizationAndTeamData?.organizationId,
+                    prNumber: params.prNumber,
+                    suggestionId: suggestion.id,
+                    safeguardMode: 'prompt_only',
+                    sandboxAvailable: false,
+                    sandboxReason: 'no_remote_commands',
+                },
+            });
+
+            return { keep: result.verdict, evidence: result.evidence };
+        } catch {
+            // Parse/LLM failure — keep suggestion (safe default)
+            return {
+                keep: true,
+                evidence: 'prompt-only parse failed, keeping as safe default',
+            };
+        }
+    }
+
+    /**
+     * Step 3: Multi-turn agent loop that searches the codebase to verify a suggestion.
+     */
+    private async verifyWithAgent(
+        suggestion: any,
+        features: SafeguardFeatureSet,
+        remoteCommands: RemoteCommands,
+        languageResultPrompt: string,
+        organizationAndTeamData: OrganizationAndTeamData,
+        prNumber: number,
+        memories?: Array<Partial<{ title?: string; rule?: string }>>,
+        documentationContext?: DocumentationContextItem[],
+        byokConfig?: NormalizedModel,
+    ): Promise<{
+        verified: boolean;
+        action: string;
+        evidence: string;
+        turnsUsed: number;
+    }> {
+        const claimedDefects = STRUCTURAL_DEFECT_FEATURES.filter(
+            (f) => features[f],
+        ).join(', ');
+
+        const systemPrompt = prompt_codeReviewSafeguard_verification({
+            suggestionContent: suggestion.suggestionContent || '',
+            claimedDefectType: claimedDefects,
+            existingCode: suggestion.existingCode || '',
+            filePath: suggestion.filePath || '',
+            languageResultPrompt,
+        });
+
+        // Build initial user message with optional memory rules context
+        let userMessage =
+            'Verify the suggestion. Begin by searching for the key symbol or reading the file.';
+        const memoriesBlock = formatMemoriesSection(
+            memories as Array<{ title?: string; rule?: string }>,
+        );
+        if (memoriesBlock) {
+            userMessage += `\n\n${memoriesBlock}\n\nConsider these team rules when evaluating the suggestion — if it contradicts a rule, lean towards discarding.`;
+        }
+
+        const documentationBlock =
+            this.buildDocumentationContextBlock(documentationContext);
+        if (documentationBlock) {
+            userMessage += `\n\n${documentationBlock}`;
+        }
+
+        // Build conversation history for multi-turn agent loop
+        // Gemini requires at least one USER message in contents (SYSTEM goes to systemInstruction)
+        const messages: Array<{ prompt: string; role: PromptRole }> = [
+            { prompt: systemPrompt, role: PromptRole.SYSTEM },
+            { prompt: userMessage, role: PromptRole.USER },
+        ];
+
+        const runName = 'safeguardAgentVerification';
+
+        // agentTurnSchema is defined at module scope (see the comment there);
+        // each turn emits EITHER a tool call or a final verdict.
+        for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+            // Migrated off the legacy LangChain PromptRunner onto the AI SDK
+            // path (REQ-NOLC-01); the outer runLLMInSpan wrapper is dropped (Q4).
+            // runStructuredReviewCall is single-shot (system + user only), so the
+            // multi-turn conversation is flattened: the SYSTEM prompt stays
+            // constant and every non-system turn (the agent's prior tool calls /
+            // verdicts and our tool results) is folded into a labelled transcript.
+            // The structured verdict/tool object the loop consumes is unchanged.
+            const conversation = messages
+                .filter((m) => m.role !== PromptRole.SYSTEM)
+                .map(
+                    (m) =>
+                        `${m.role === PromptRole.AI ? 'Assistant' : 'User'}: ${m.prompt}`,
+                )
+                .join('\n\n');
+
+            const response = await LLM.run({
+                schema: agentTurnSchema,
+                system: systemPrompt,
+                user: conversation,
+                runName: `${runName}_turn${turn}`,
+                organizationId: organizationAndTeamData?.organizationId,
+                byokConfig,
+                attrs: {
+                    organizationId: organizationAndTeamData?.organizationId,
+                    prNumber,
+                    turn,
+                    suggestionId: suggestion.id,
+                    safeguardMode: 'agent_verification',
+                    sandboxAvailable: true,
+                    sandboxReason: 'remote_commands_available',
+                },
+            });
+
+            const responseText = JSON.stringify(response);
+
+            const parsed = this.parseAgentResponse(responseText);
+
+            if (!parsed) {
+                // Invalid response — ask for valid JSON
+                messages.push({ prompt: responseText, role: PromptRole.AI });
+                messages.push({
+                    prompt: 'Respond with valid JSON only. Either a tool call or a verdict.',
+                    role: PromptRole.USER,
+                });
+                continue;
+            }
+
+            // Final verdict
+            if ('verdict' in parsed) {
+                // Reject ANY verdict on the first turn — the agent must make at
+                // least one tool call before deciding. Keeping requires evidence
+                // the defect is real; discarding (refute-to-drop) requires
+                // evidence it is wrong/mitigated. Neither can be proven without
+                // investigating, so a turn-0 verdict is never grounded.
+                if (turn === 0) {
+                    messages.push({
+                        prompt: JSON.stringify(parsed),
+                        role: PromptRole.AI,
+                    });
+                    messages.push({
+                        prompt:
+                            parsed.verdict === true
+                                ? 'You must use at least one tool call to verify the defect exists in the actual code before giving a verdict. Search for the key symbol or read the file first.'
+                                : 'You must use at least one tool call to actively REFUTE the defect before discarding. A discard requires concrete evidence the finding is wrong, mitigated, or unreachable — search for the key symbol or read the file first.',
+                        role: PromptRole.USER,
+                    });
+                    continue;
+                }
+
+                return {
+                    verified: parsed.verdict,
+                    action:
+                        parsed.action ||
+                        (parsed.verdict ? 'no_changes' : 'discard'),
+                    evidence: parsed.evidence || '',
+                    turnsUsed: turn + 1,
+                };
+            }
+
+            // Tool call — execute and feed result back
+            let toolResult: string;
+            try {
+                if (parsed.tool === 'search') {
+                    toolResult = await remoteCommands.grep(
+                        parsed.pattern || '',
+                        '.',
+                        undefined,
+                    );
+                    // Limit results to avoid blowing up context
+                    const lines = toolResult.split('\n');
+                    if (lines.length > 15) {
+                        toolResult =
+                            lines.slice(0, 15).join('\n') +
+                            `\n... (${lines.length - 15} more matches)`;
+                    }
+                } else if (parsed.tool === 'read') {
+                    toolResult = await remoteCommands.read(
+                        parsed.path || '',
+                        0,
+                        0,
+                    );
+                    const MAX_READ_LENGTH = 20000;
+                    if (toolResult.length > MAX_READ_LENGTH) {
+                        toolResult =
+                            toolResult.substring(0, MAX_READ_LENGTH) +
+                            `\n... (file truncated)`;
+                    }
+                } else if (parsed.tool === 'list') {
+                    toolResult = await remoteCommands.listDir(
+                        parsed.path || '.',
+                        2,
+                    );
+                    const MAX_LIST_LENGTH = 10000;
+                    if (toolResult.length > MAX_LIST_LENGTH) {
+                        toolResult =
+                            toolResult.substring(0, MAX_LIST_LENGTH) +
+                            `\n... (listing truncated)`;
+                    }
+                } else if (parsed.tool === 'documentation') {
+                    toolResult = await this.getDocumentationToolResult(
+                        parsed.packageName || '',
+                        parsed.query || suggestion?.suggestionContent || '',
+                        documentationContext,
+                    );
+                } else {
+                    toolResult = `Unknown tool: ${parsed.tool}`;
+                }
+            } catch (toolError) {
+                toolResult = `Tool error: ${toolError instanceof Error ? toolError.message : String(toolError)}`;
+            }
+
+            this.logger.log({
+                message: `[AGENT-TOOL] PR#${prNumber} ${suggestion.id} turn=${turn} tool=${parsed.tool} path=${parsed.path || parsed.pattern || ''} resultLength=${toolResult.length}${toolResult.startsWith('Tool error') ? ` error=${toolResult.substring(0, 150)}` : ''}`,
+                context: SafeguardPipelineService.name,
+            });
+
+            messages.push({
+                prompt: JSON.stringify(parsed),
+                role: PromptRole.AI,
+            });
+
+            const remainingTurns = MAX_AGENT_TURNS - turn - 1;
+            let followUp = `Tool result:\n${toolResult}`;
+            if (remainingTurns <= 1) {
+                followUp += `\n\nThis is your LAST tool call. You MUST respond with a verdict now.`;
+            } else if (remainingTurns <= 2) {
+                followUp += `\n\n${remainingTurns} tool call(s) remaining. Provide your verdict unless you need one critical search.`;
+            }
+
+            messages.push({
+                prompt: followUp,
+                role: PromptRole.USER,
+            });
+        }
+
+        // Max turns reached — default to keep (assume defect is real)
+        return {
+            verified: true,
+            action: 'no_changes',
+            evidence: 'Max agent turns reached — defaulting to keep',
+            turnsUsed: MAX_AGENT_TURNS,
+        };
+    }
+
+    /**
+     * Parse agent response text into a structured object.
+     * Returns null if the response is not valid JSON.
+     */
+    private parseAgentResponse(text: string): any {
+        if (!text?.trim()) return null;
+
+        // Fast path: already-clean JSON.
+        try {
+            return JSON.parse(text);
+        } catch {
+            // intentional fallback
+        }
+
+        // Shared text→JSON extractor: unwraps a ```json fence, slices the
+        // outermost balanced object (string-aware), and strips trailing commas —
+        // the same primitive the review structured path uses.
+        const extracted = extractJsonFromText(text);
+        if (!extracted) return null;
+
+        try {
+            return JSON.parse(extracted);
+        } catch {
+            // intentional fallback
+        }
+
+        // Last resort: some models emit JS-style `//` line comments inside the
+        // JSON — strip them and retry (the one thing the shared extractor leaves).
+        try {
+            return JSON.parse(extracted.replace(/\/\/[^\n]*/g, ''));
+        } catch {
+            return null;
+        }
+    }
+
+    private buildDocumentationContextBlock(
+        documentationContext?: DocumentationContextItem[],
+    ): string {
+        if (!documentationContext?.length) {
+            return '';
+        }
+
+        const excerpts = documentationContext
+            .map(
+                (item, index) =>
+                    `${index + 1}. ${item.title || 'Documentation'} (${item.url || 'unknown'})\nQuery: ${item.query}\nSnippet: ${item.snippet || ''}`,
+            )
+            .join('\n\n');
+
+        return `## Available Documentation Context\nUse this context first before requesting more docs with the documentation tool.\n\n${excerpts}`;
+    }
+
+    private async getDocumentationToolResult(
+        packageName: string,
+        query: string,
+        fallbackContext?: DocumentationContextItem[],
+    ): Promise<string> {
+        const normalizedQuery = (query || '').trim();
+        const normalizedPackageName = (packageName || '').trim();
+
+        if (!normalizedQuery) {
+            return 'Documentation tool error: query is required.';
+        }
+
+        const localMatch = (fallbackContext || []).find(
+            (item) =>
+                item.query
+                    ?.toLowerCase()
+                    .includes(normalizedQuery.toLowerCase()) ||
+                item.title
+                    ?.toLowerCase()
+                    .includes(normalizedPackageName.toLowerCase()),
+        );
+
+        if (localMatch) {
+            return `Documentation (preloaded):\nTitle: ${localMatch.title}\nURL: ${localMatch.url}\nSnippet: ${localMatch.snippet}`;
+        }
+
+        const packageForPlan = normalizedPackageName || 'framework';
+
+        const planByFile: Record<string, DocumentationQueryPlanByFile> = {
+            safeguard: {
+                queryTasks: [
+                    {
+                        packageName: packageForPlan,
+                        query: normalizedQuery,
+                    },
+                ],
+            },
+        };
+
+        const results =
+            await this.documentationSearchExaService.searchByFilePlan(
+                planByFile,
+            );
+        const docs = results.safeguard || [];
+
+        if (!docs.length) {
+            return `Documentation lookup returned no results for package "${packageForPlan}" and query "${normalizedQuery}".`;
+        }
+
+        const doc = docs[0];
+
+        return `Documentation:\nTitle: ${doc.title}\nURL: ${doc.url}\nQuery: ${doc.query}\nSnippet: ${doc.snippet}`;
+    }
+
+    /**
+     * Build the user prompt with file context and suggestions.
+     */
+    private buildUserPrompt(context: {
+        fileContent: string;
+        relevantContent: string;
+        patchWithLinesStr: string;
+        filePath: string;
+        suggestions: any[];
+        crossFileSnippets?: CrossFileContextSnippet[];
+        memories?: Array<Partial<{ title?: string; rule?: string }>>;
+        externalReferences?: unknown[];
+        externalReferenceErrors?: unknown[] | string;
+    }): string {
+        let crossFileBlock = '';
+        if (context.crossFileSnippets?.length) {
+            const snippetLines = context.crossFileSnippets.map(
+                (s) =>
+                    `#### ${s.filePath}${s.relatedSymbol ? ` (symbol: ${s.relatedSymbol})` : ''}\n**Rationale:** ${s.rationale}\n\`\`\`\n${s.content}\n\`\`\``,
+            );
+            crossFileBlock = `\n\n<codebaseContext>\n${SAFEGUARD_CROSS_FILE_CONTEXT_PREAMBLE}\n${snippetLines.join('\n\n')}\n</codebaseContext>`;
+        }
+
+        // Build external context blocks (memories, references, errors)
+        const externalBlocks: string[] = [];
+
+        const memoriesBlock = formatMemoriesSection(
+            context.memories as Array<{ title?: string; rule?: string }>,
+        );
+        if (memoriesBlock) externalBlocks.push(memoriesBlock);
+
+        const referencesBlock = formatReferenceSection(
+            context.externalReferences,
+        );
+        if (referencesBlock) externalBlocks.push(referencesBlock);
+
+        const errorsBlock = formatSyncErrors(context.externalReferenceErrors);
+        if (errorsBlock) externalBlocks.push(errorsBlock);
+
+        let externalContextBlock = '';
+        if (externalBlocks.length) {
+            externalContextBlock = `\n\n<externalContext>\n## External Context & Injected Knowledge\n\nThe following information is provided to ground your analysis in the broader system reality. Use this as your source of truth.\n\n---\n\n${externalBlocks.join('\n\n---\n\n')}\n</externalContext>`;
+        }
+
+        return `
+## Context
+
+<fileContent>
+    ${context.relevantContent || context.fileContent}
+</fileContent>
+
+<codeDiff>
+    ${context.patchWithLinesStr}
+</codeDiff>
+
+<filePath>
+    ${context.filePath}
+</filePath>
+
+<suggestionsContext>
+${JSON.stringify(context?.suggestions) || 'No suggestions provided'}
+</suggestionsContext>${crossFileBlock}${externalContextBlock}`;
+    }
+
+    /**
+     * Detect if an error indicates the sandbox is no longer running.
+     */
+    private isSandboxDeadError(error: unknown): boolean {
+        const msg = error instanceof Error ? error.message : String(error);
+        return (
+            /sandbox/i.test(msg) ||
+            msg.includes('ECONNREFUSED') ||
+            msg.includes('not running')
+        );
+    }
+
+    /**
+     * Detect if the agent's discard evidence suggests the sandbox was dead
+     * (e.g. all tool calls returned "Sandbox is probably not running").
+     */
+    private isSandboxRelatedEvidence(evidence?: string): boolean {
+        if (!evidence) return false;
+        const lower = evidence.toLowerCase();
+        return (
+            lower.includes('sandbox') ||
+            lower.includes('not running') ||
+            lower.includes('econnrefused')
+        );
+    }
+}

@@ -1,0 +1,147 @@
+import { Injectable } from '@nestjs/common';
+import { LLM } from '@libs/llm/llm';
+import type { NormalizedModel } from '@libs/llm/byok-config';
+import { llmErrorLogLevel } from '@libs/llm/error-classifier';
+import { createLogger } from '@libs/core/log/logger';
+import {
+    prompt_validateCodeSemantics,
+    ValidateCodeSemanticsResult,
+    validateCodeSemanticsSchema,
+} from '@libs/common/utils/prompts/validateCodeSemantics';
+import {
+    checkSuggestionSimplicitySchema,
+    prompt_checkSuggestionSimplicity_system,
+    prompt_checkSuggestionSimplicity_user,
+} from '@libs/common/utils/prompts/checkSuggestionSimplicity';
+import { CodeSuggestion } from '@libs/core/infrastructure/config/types/general/codeReview.type';
+import { OrganizationAndTeamData } from '@libs/core/infrastructure/config/types/general/organizationAndTeamData';
+import { ObservabilityService } from '@libs/core/log/observability.service';
+
+@Injectable()
+export class SuggestionLLMValidator {
+    private readonly logger = createLogger(SuggestionLLMValidator.name);
+
+    constructor(
+        private readonly observabilityService: ObservabilityService,
+    ) {}
+
+    async validateWithLLM(
+        payload: {
+            code: string;
+            filePath: string;
+            language?: string;
+            diff?: string;
+        },
+        organizationAndTeamData: OrganizationAndTeamData,
+        prNumber: number,
+        byokConfig?: NormalizedModel,
+    ): Promise<ValidateCodeSemanticsResult | null> {
+        const runName = `${SuggestionLLMValidator.name}::validateWithLLM`;
+
+        try {
+            // Migrated off the legacy LangChain PromptRunner path onto the
+            // AI SDK path (REQ-NOLC-01). byokConfig is threaded from the pipeline's
+            // resolved model slot (falls back to the managed default when the org
+            // has none) — this used to hardcode `byokConfig: undefined` regardless
+            // of BYOK, a leftover of the migration off LangChain. The outer
+            // LangChain span wrapper is dropped — runStructuredReviewCall owns the
+            // single span path (Q4). setTemperature(0) is likewise dropped (not threaded).
+            const result = await LLM.run({
+                schema: validateCodeSemanticsSchema,
+                user: prompt_validateCodeSemantics(payload),
+                runName,
+                organizationId: organizationAndTeamData?.organizationId,
+                attrs: {
+                    prNumber,
+                    filePath: payload.filePath,
+                    teamId: organizationAndTeamData?.teamId,
+                },
+                byokConfig,
+            });
+
+            return result;
+        } catch (error) {
+            // Terminal BYOK failure (suspended key / out of credit) → warn, not
+            // error: it's the user's provider config, and it fans out to every
+            // suggestion. A real fault stays error.
+            this.logger[llmErrorLogLevel(error)]({
+                message: 'Error executing LLM validation',
+                context: SuggestionLLMValidator.name,
+                metadata: {
+                    filePath: payload.filePath,
+                    organizationAndTeamData,
+                    prNumber,
+                },
+                error,
+            });
+            return null;
+        }
+    }
+
+    async checkSuggestionSimplicity(
+        organizationAndTeamData: OrganizationAndTeamData,
+        prNumber: number,
+        suggestion: Partial<CodeSuggestion>,
+        byokConfig?: NormalizedModel,
+    ): Promise<{ isSimple: boolean; reason?: string }> {
+        const runName = `${SuggestionLLMValidator.name}::checkSuggestionSimplicity`;
+
+        try {
+            // Migrated off the legacy LangChain PromptRunner path onto the
+            // AI SDK path (REQ-NOLC-01). byokConfig is threaded from the pipeline's
+            // resolved model slot (falls back to the managed default when the org
+            // has none) — this used to hardcode `byokConfig: undefined` regardless
+            // of BYOK, a leftover of the migration off LangChain. Outer LangChain
+            // span wrapper dropped — one span path via runStructuredReviewCall (Q4).
+            // setTemperature(0) dropped (not threaded).
+            const result = await LLM.run({
+                schema: checkSuggestionSimplicitySchema,
+                system: prompt_checkSuggestionSimplicity_system(),
+                user: prompt_checkSuggestionSimplicity_user({
+                    language: suggestion.language || 'text',
+                    existingCode: suggestion.existingCode || '',
+                    improvedCode: suggestion.improvedCode || '',
+                }),
+                runName,
+                organizationId: organizationAndTeamData?.organizationId,
+                attrs: {
+                    prNumber,
+                    teamId: organizationAndTeamData?.teamId,
+                    suggestionId: suggestion.id,
+                },
+                byokConfig,
+            });
+
+            if (!result) {
+                this.logger.warn({
+                    message:
+                        'No result from LLM when checking suggestion simplicity',
+                    context: SuggestionLLMValidator.name,
+                    metadata: {
+                        organizationAndTeamData,
+                        prNumber,
+                        suggestionId: suggestion.id,
+                    },
+                });
+
+                return { isSimple: false, reason: 'No result from LLM' };
+            }
+
+            return result;
+        } catch (error) {
+            // See above: terminal BYOK billing/auth → warn, real fault → error.
+            this.logger[llmErrorLogLevel(error)]({
+                message: 'Error checking suggestion simplicity',
+                error,
+                context: SuggestionLLMValidator.name,
+                metadata: {
+                    organizationAndTeamData,
+                    prNumber,
+                    suggestionId: suggestion.id,
+                },
+            });
+
+            return { isSimple: false, reason: 'Error during check' };
+        }
+    }
+}

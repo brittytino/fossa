@@ -1,0 +1,400 @@
+import { readAttemptedSlot } from '@libs/llm/model-failover';
+import type {
+    ContextEvidence,
+    ContextLayer,
+    ContextPack,
+} from '@libs/ai-engine/infrastructure/adapters/services/context/context-pack';
+import { IExternalPromptContext } from '@libs/ai-engine/domain/prompt/interfaces/promptExternalReference.interface';
+import { ContextAugmentationsMap } from '@libs/ai-engine/infrastructure/adapters/services/context/interfaces/code-review-context-pack.interface';
+import { AutomationExecutionEntity } from '@libs/automation/domain/automationExecution/entities/automation-execution.entity';
+import {
+    CreateSandboxParams,
+    SandboxInstance,
+} from '@libs/sandbox/domain/contracts/sandbox.provider';
+import { IPullRequestMessages } from '@libs/code-review/domain/pullRequestMessages/interfaces/pullRequestMessages.interface';
+import { CollectCrossFileContextsResult } from '@libs/code-review/infrastructure/adapters/services/collectCrossFileContexts.service';
+import type { TraceContextDecision } from '@libs/cli-review/domain/types/trace-context.types';
+import type { PrDecisionRecord } from '@libs/code-review/domain/contracts/pr-decision-store.contract';
+import { LlmErrorCategory } from '@libs/llm/error-classifier';
+import type { ReviewWarning } from '@libs/code-review/infrastructure/agents/engine/review-warnings';
+import type { LinkedRepositoriesReviewMetadata } from '../../domain/types/linked-repositories.types';
+import { PlatformType } from '@libs/core/domain/enums';
+import {
+    AnalysisContext,
+    AutomaticReviewStatus,
+    CodeReviewConfig,
+    CodeSuggestion,
+    CommentResult,
+    FileChange,
+    Repository,
+} from '@libs/core/infrastructure/config/types/general/codeReview.type';
+import { Commit } from '@libs/core/infrastructure/config/types/general/commit.type';
+import { OrganizationAndTeamData } from '@libs/core/infrastructure/config/types/general/organizationAndTeamData';
+import { PipelineContext } from '@libs/core/infrastructure/pipeline/interfaces/pipeline-context.interface';
+import { IClusterizedSuggestion } from '@libs/fossyFineTuning/domain/interfaces/fossyFineTuning.interface';
+import { ISuggestionByPR } from '@libs/platformData/domain/pullRequests/interfaces/pullRequests.interface';
+
+export type PullRequestType = {
+    number: number;
+    title: string;
+    base: {
+        repo: {
+            fullName: string;
+        };
+        ref: string;
+    };
+    head?: {
+        sha: string;
+        ref: string;
+    };
+    repository: Repository;
+    isDraft: boolean;
+    tags?: string[];
+    stats: {
+        total_additions: number;
+        total_deletions: number;
+        total_files: number;
+        total_lines_changed: number;
+    };
+    [key: string]: any;
+};
+
+export interface CodeReviewPipelineContext extends PipelineContext {
+    organizationAndTeamData: OrganizationAndTeamData;
+    repository: Repository;
+    branch: string;
+    pullRequest: PullRequestType;
+    teamAutomationId: string;
+    origin: string;
+    action: string;
+    platformType: PlatformType;
+    triggerCommentId?: number | string;
+    userGitId?: string;
+    /**
+     * Free-text steering directive from a review command
+     * (`@fossy review focus on the auth logic`). Threaded into the finder prompt
+     * as a high-priority focus block. Empty/undefined = a normal review.
+     */
+    reviewDirective?: string;
+
+    /**
+     * HEAVY mode — opt-in per review (CLI `--heavy` or PR `@fossy review
+     * --heavy`). Runs an extra "what did you miss?" critic pass in the finder
+     * for higher recall, at ~+1 finder pass of cost. Off by default.
+     */
+    heavy?: boolean;
+
+    codeReviewConfig?: CodeReviewConfig;
+    automaticReviewStatus?: AutomaticReviewStatus;
+
+    /** Commits NOVOS do PR (após lastAnalyzedCommit) - usados para validação de merge-only */
+    prCommits?: Commit[];
+
+    /** TODOS os commits do PR - usados para salvar no banco (aggregateAndSaveDataStructure) */
+    prAllCommits?: Commit[];
+
+    /** Arquivos preliminares SEM conteúdo - buscados no ResolveConfigStage para determinar config */
+    preliminaryFiles?: FileChange[];
+
+    /** Arquivos filtrados COM conteúdo - após aplicar ignorePaths no FetchChangedFilesStage */
+    changedFiles?: FileChange[];
+
+    /** List of files ignored by configuration patterns */
+    ignoredFiles?: string[];
+
+    lastExecution?: {
+        commentId?: any;
+        noteId?: any;
+        threadId?: any;
+        lastAnalyzedCommit?: any;
+    };
+    pipelineMetadata?: {
+        // Inherited from PipelineContext.pipelineMetadata — re-declared here
+        // because TS treats the child shape as a full override of the parent,
+        // not an intersection, and the PipelineExecutor populates these at
+        // runtime (see pipeline-executor.service.ts).
+        pipelineId?: string;
+        pipelineName?: string;
+        parentPipelineId?: string;
+        rootPipelineId?: string;
+        lastExecution?: AutomationExecutionEntity;
+        notificationHandled?: boolean;
+        showStatusFeedback?: boolean;
+        forceFullRerun?: boolean;
+        /** Org subscription status (e.g. 'trial', 'active'), captured by
+         *  ValidatePrerequisitesStage from the license validation so later
+         *  stages can pick a trial-specific model. */
+        subscriptionStatus?: string;
+        [key: string]: any;
+    };
+
+    initialCommentData?: {
+        commentId: number;
+        noteId: number;
+        threadId?: number;
+    };
+
+    pullRequestMessagesConfig?: IPullRequestMessages;
+
+    clusterizedSuggestions?: IClusterizedSuggestion[];
+
+    preparedFileContexts: AnalysisContext<PullRequestType>[];
+
+    fileAnalysisResults?: Array<{
+        validSuggestionsToAnalyze: Partial<CodeSuggestion>[];
+        discardedSuggestionsBySafeGuard: Partial<CodeSuggestion>[];
+        file: FileChange;
+    }>;
+
+    prAnalysisResults?: {
+        validSuggestionsByPR?: ISuggestionByPR[];
+        validCrossFileSuggestions?: CodeSuggestion[];
+    };
+
+    validSuggestions: Partial<CodeSuggestion>[];
+    discardedSuggestions: Partial<CodeSuggestion>[];
+    lastAnalyzedCommit?: any;
+
+    /**
+     * Set by ValidateNewCommitsStage when lastAnalyzedCommit is no longer
+     * reachable from the PR branch (rebase / force-push rewrote history).
+     * Forwarded by CodeReviewHandlerService and persisted to
+     * dataExecution.orphanedBaseCommit for observability. Absent on normal
+     * runs.
+     */
+    orphanedBaseCommit?: {
+        previousSha: string;
+        currentHeadSha?: string;
+        totalCommits: number;
+    };
+
+    validSuggestionsByPR?: ISuggestionByPR[];
+    validCrossFileSuggestions?: CodeSuggestion[];
+
+    /** Business logic validation results — merged into PR-level comments by CreatePrLevelCommentsStage. */
+    businessLogicResults?: ISuggestionByPR[];
+
+    /**
+     * Per-stage outcome reported by BusinessLogicValidationStage (agent engine)
+     * for UI/observer display. Distinct from the pipeline-wide statusInfo —
+     * setting statusInfo.status = SKIPPED would abort the whole pipeline,
+     * which is NOT what we want when only this validation is skipped.
+     */
+    businessLogicOutcome?: {
+        kind: 'success' | 'gap_found' | 'skipped' | 'error';
+        message: string;
+        reason?: string;
+    };
+
+    /**
+     * Set by BusinessLogicValidationStage when a business-logic message was
+     * actually delivered to the PR author. Persisted to
+     * dataExecution.businessLogicValidatedAt and carried across executions, so
+     * the automatic validation runs once per PR instead of once per push.
+     */
+    businessLogicValidatedAt?: string;
+
+    /**
+     * SHA-256 hash of the PR body at the time of the last successful business
+     * logic validation. Written by ProcessFilesPrLevelReviewStage (legacy EE
+     * path); superseded by businessLogicValidatedAt on the agent pipeline,
+     * which does not key the gate on a body Fossy's own summary may rewrite.
+     */
+    businessLogicPrBodyHash?: string;
+
+    lineComments?: CommentResult[];
+
+    // Resultados dos comentários de nível de PR
+    prLevelCommentResults?: Array<CommentResult>;
+
+    // Metadados dos arquivos processados (reviewMode, codeReviewModelUsed, etc.)
+    fileMetadata?: Map<string, any>;
+
+    /** Bloco com conteúdos de arquivos externos referenciados pelos prompts. */
+    externalPromptContext?: IExternalPromptContext;
+    /** Decisions recorded by Fossa Trace, scoped to the changed files. */
+    traceDecisions?: TraceContextDecision[];
+    /** Suggestions already posted on THIS PR in a previous review round,
+     *  scoped to the changed files (issue #1313). */
+    previousDecisions?: PrDecisionRecord[];
+    /** Camadas já formatadas para incluir no ContextPack (ex.: arquivos, instruções). */
+    externalPromptLayers?: ContextLayer[];
+
+    /** ContextPack compartilhado entre os stages (instruções + camadas externas). */
+    sharedContextPack?: ContextPack;
+    /** Augmentations geradas dinamicamente durante o pipeline, mapeadas por nome de arquivo. */
+    augmentationsByFile?: Record<string, ContextAugmentationsMap>;
+
+    fileContextMap?: Record<string, FileContextAgentResult>;
+
+    crossFileContexts?: CollectCrossFileContextsResult;
+
+    discoveredPackages?: RepositoryPackageReference[];
+    documentationQueryPlanByFile?: Record<string, DocumentationQueryPlanByFile>;
+    documentationByFile?: Record<string, DocumentationItem[]>;
+
+    /** Graph JSON (nodes + edges) from fossa-graph parse, used by GraphContentFormatter for Tier 1 formatting */
+    callGraphJson?: { nodes: any[]; edges: any[] };
+
+    /** Sandbox handle kept alive for safeguard agent verification */
+    sandboxHandle?: SandboxInstance;
+
+    /** Parameters used to create the sandbox — kept for renewal if it expires */
+    getFreshCloneParams?: () => Promise<CreateSandboxParams>;
+
+    correlationId?: string;
+
+    /** Dedup telemetry captured by AgentReviewStage and exported by benchmark tooling. */
+    dedupTrace?: DedupTraceSummary;
+
+    /** Parent (job-level) AbortSignal. Forwarded from runCodeReview use-case
+     *  via the strategy payload, then plumbed into AgentReviewStage so the
+     *  agent-loop's local AbortController is aborted when the router-level
+     *  job timeout fires (instead of leaving an LLM call running ghost). */
+    parentSignal?: AbortSignal;
+
+    /**
+     * Snapshot of the most important failure surfaced by AgentReviewStage —
+     * carried in-memory through the rest of the pipeline so the end-review
+     * comment stage can render a precise message without re-walking errors[].
+     * The actual outcome (SUCCESS / PARTIAL_ERROR / ERROR) lives in
+     * `errors[].severity` and ultimately on `automation_execution.status`;
+     * this only exists to interpolate the user-facing reason.
+     */
+    lastReviewError?: {
+        category: LlmErrorCategory;
+        provider?: string;
+        friendlyMessage: string;
+        agentName?: string;
+        occurredAt: Date;
+        /** Status the provider answered with, when it answered at all. */
+        httpStatus?: number;
+        /** The provider's own sentence, redacted and capped by the classifier. */
+        providerMessage?: string;
+        /** Model id the review actually ran on — the resolved slot's, not the
+         *  configured default, so a routed override is reported as what ran. */
+        model?: string;
+    };
+
+    /**
+     * Fidelity warnings emitted when the pipeline had to drop quality to
+     * fit a small model context window. Populated by AgentReviewStage
+     * from the orchestrator's deduped list. Surfaced to the user as a
+     * collapsible section in the end-review PR comment (rendered by
+     * commentManager) and captured in telemetry. Absent / empty when the
+     * review ran at full fidelity.
+     */
+    reviewWarnings?: ReviewWarning[];
+
+    /**
+     * Cross-repo context (#1576): which linked repositories were consulted
+     * (and their clone/ref status). Populated by AgentReviewStage after the
+     * agent run. Used for end-review transparency + telemetry. Absent when
+     * the feature is off.
+     */
+    linkedRepositoriesMetadata?: LinkedRepositoriesReviewMetadata;
+}
+
+export interface DedupTraceSuggestionSummary {
+    relevantFile?: string;
+    relevantLinesStart?: number;
+    relevantLinesEnd?: number;
+    label?: string;
+    severity?: string;
+    level?: string;
+    oneSentenceSummary?: string;
+}
+
+export interface DedupTraceGroupSummary {
+    keep: DedupTraceSuggestionSummary;
+    duplicates: DedupTraceSuggestionSummary[];
+}
+
+export interface DedupTraceSummary {
+    status: 'skipped' | 'success' | 'empty-keep-all' | 'failed-keep-all';
+    totalClassifiedCount: number;
+    fossyRulesSkippedCount: number;
+    nonFossyInputCount: number;
+    nonFossyOutputCount: number;
+    finalOutputCount: number;
+    uniqueCount: number;
+    groupsCount: number;
+    removedCount: number;
+    errorMessage?: string;
+    groups?: DedupTraceGroupSummary[];
+    unique?: DedupTraceSuggestionSummary[];
+}
+
+export interface FileContextAgentResult {
+    sandboxEvidences?: ContextEvidence[];
+    resolvedPromptOverrides?: CodeReviewConfig['v2PromptOverrides'];
+}
+
+export interface RepositoryPackageReference {
+    name: string;
+    version?: string;
+    ecosystem: 'npm' | 'pip' | 'maven' | 'gradle' | 'go' | 'cargo' | 'ruby';
+    sourceFile: string;
+}
+
+export interface DocumentationQueryPlanByFile {
+    queryTasks: DocumentationQueryTask[];
+}
+
+export interface DocumentationQueryTask {
+    packageName: string;
+    query: string;
+}
+
+export interface DocumentationItem {
+    query: string;
+    title: string;
+    url: string;
+    snippet: string;
+    source: 'exa-search';
+}
+
+/**
+ * The model the review ACTUALLY ran on.
+ *
+ * Read from the resolved slot rather than the configured default, so a routed
+ * or per-task override is reported as what ran instead of what was configured.
+ * Both failure paths that record `lastReviewError` already read `provider` off
+ * this same slot; taking the model from anywhere else would let a report name a
+ * provider and a model that never met.
+ */
+export const resolvedModel = (
+    context: Pick<CodeReviewPipelineContext, 'codeReviewConfig'>,
+    err?: unknown,
+): string | undefined => {
+    // The cascade is primary → fallback, so an error that survived both belongs
+    // to the fallback. Reporting the resolved slot there names a model that did
+    // not produce this failure — worse than saying nothing, because it reads as
+    // fact. `runWithModelFailover` stamps the attempt it actually ran.
+    const attempted = readAttemptedSlot(err)?.model;
+    if (typeof attempted === 'string' && attempted.length > 0) return attempted;
+
+    const model = context.codeReviewConfig?.resolvedModelSlot?.model;
+    return typeof model === 'string' && model.length > 0 ? model : undefined;
+};
+
+/**
+ * The provider that answered the failing attempt.
+ *
+ * Kept beside {@link resolvedModel} so the two are always read from the SAME
+ * attempt: a fallback model reported next to the primary's provider is a pair
+ * that never existed, which is the failure mode this helper prevents rather than
+ * a detail it improves.
+ */
+export const resolvedProvider = (
+    context: Pick<CodeReviewPipelineContext, 'codeReviewConfig'>,
+    err?: unknown,
+): string | undefined => {
+    const attempted = readAttemptedSlot(err)?.provider;
+    if (typeof attempted === 'string' && attempted.length > 0) return attempted;
+
+    const provider = context.codeReviewConfig?.resolvedModelSlot?.provider;
+    return typeof provider === 'string' && provider.length > 0
+        ? provider
+        : undefined;
+};

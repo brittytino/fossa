@@ -1,0 +1,45 @@
+name: Permissions Matrix Check
+
+on:
+    pull_request:
+        paths:
+            - "libs/identity/domain/permissions/policies/role-policies.ts"
+            - "libs/identity/domain/permissions/enums/permissions.enum.ts"
+            - "docs/_snippets/rbac-matrix-generated.mdx"
+            - "scripts/permissions/**"
+            - ".github/workflows/permissions-matrix-check.yml"
+
+permissions:
+    contents: read
+    id-token: write # quality signal (report-signal action, WIF)
+
+jobs:
+    matrix-check:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6.0.2
+
+            - uses: pnpm/action-setup@v4
+
+            - name: Set up Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "22"
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Verify docs RBAC matrix is in sync with ROLE_POLICIES
+              run: pnpm run permissions:matrix:check
+
+            - name: Report quality signal
+              if: always()
+              uses: ./.github/actions/report-signal
+              with:
+                  name: gate.permissions_matrix
+                  status: ${{ job.status }}
+                  gcp_wif_provider: ${{ vars.GCP_WIF_PROVIDER }}
+                  gcp_sa_email: ${{ vars.GCP_SA_EMAIL }}
+                  gcp_project: ${{ vars.GCP_PROJECT }}

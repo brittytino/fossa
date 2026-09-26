@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+    #----------------------------------------------------------------
+    # Application Services (Production Build - Simulation)
+    # Using pre-baked images from scripts/docker/bake-local.sh
+    #----------------------------------------------------------------
+    api:
+        image: fossa-ai-api:local
+        pull_policy: never
+        container_name: fossa_api_sim
+        restart: unless-stopped
+        env_file:
+            - .env
+        environment:
+            - API_PG_DB_HOST=db_postgres
+            - API_MG_DB_HOST=mongodb
+            - NODE_ENV=production
+            - COMPONENT_TYPE=api
+        ports:
+            - '3331:3001'
+        networks:
+            - fossa-backend-services
+
+    worker:
+        image: fossa-ai-worker:local
+        pull_policy: never
+        container_name: fossa_worker_sim
+        restart: unless-stopped
+        env_file:
+            - .env
+        environment:
+            - API_PG_DB_HOST=db_postgres
+            - API_MG_DB_HOST=mongodb
+            - NODE_ENV=production
+            - COMPONENT_TYPE=worker
+        networks:
+            - fossa-backend-services
+
+    webhooks:
+        image: fossa-ai-webhook:local
+        pull_policy: never
+        container_name: fossa_webhooks_sim
+        restart: unless-stopped
+        env_file:
+            - .env
+        environment:
+            - API_PG_DB_HOST=db_postgres
+            - API_MG_DB_HOST=mongodb
+            - NODE_ENV=production
+            - COMPONENT_TYPE=webhook
+        ports:
+            - '3333:3332'
+        networks:
+            - fossa-backend-services
+
+networks:
+    fossa-backend-services:
+        external: true

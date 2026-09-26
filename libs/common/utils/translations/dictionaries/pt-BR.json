@@ -1,0 +1,107 @@
+{
+    "reviewComment": {
+        "talkToFossy": "Fale com o Fossy mencionando @fossy",
+        "feedback": "Essa sugestão foi útil? Reaja com 👍 ou 👎 para ajudar o Fossy a aprender com essa interação."
+    },
+    "pullRequestFinishSummaryMarkdown": {
+        "withComments": "## Revisão de Código Concluída! 🔥\n\nA revisão de código foi concluída com sucesso com base nas suas configurações atuais.\n\n",
+        "withoutComments": "# Revisão da Fossy Concluída\n**Boa notícia!** 🎉\nNenhum problema foi encontrado com base nas suas configurações de revisão.\n\nContinuem com o ótimo trabalho! 🚀",
+        "withErrors": "## Revisão de Código Não Concluída ⚠️\n\nA revisão falhou antes que sugestões pudessem ser geradas.\n\n**Motivo:** {{errorMessage}}\n\nApós corrigir o problema, comente `@fossy review` neste PR para refazer a revisão.\n\n",
+        "partialErrorsNotice": "\n\n> ⚠️ Observação: algumas etapas da revisão não puderam ser concluídas nesta execução, por isso a aprovação automática (quando ativa) foi pulada. Veja os detalhes em {{dashboardUrl}} e depois comente `@fossy review` neste PR para tentar novamente após resolver o problema.\n"
+    },
+    "pullRequestSummaryMarkdown": {
+        "title": "Resumo da PR (Comentário criado por [Fossy](https://github.com/brittytino/fossa) 🤖)",
+        "codeReviewStarted": "Revisão de Código Iniciada! 🚀",
+        "description": "✋ Olá, time! Já estou analisando os arquivos alterados e iniciando a revisão para garantir que tudo esteja em ordem. Se precisarem de mais detalhes, estou aqui! [Fossy](https://github.com/brittytino/fossa)",
+        "changedFiles": "📂 Arquivos Alterados",
+        "filesTable": [
+            "Arquivo",
+            "Status",
+            "➕ Adições",
+            "➖ Remoções",
+            "🔄 Alterações"
+        ],
+        "summary": "📊 Resumo das Alterações",
+        "totalFiles": "Total de Arquivos",
+        "totalAdditions": "Total de Linhas Adicionadas",
+        "totalDeletions": "Total de Linhas Removidas",
+        "totalChanges": "Total de Alterações"
+    },
+    "configReviewMarkdown": {
+        "title": "Guia Fossy: Uso e Configuração",
+        "interactingTitle": "Interagindo com o Fossy",
+        "requestReview": "Solicitar uma Revisão",
+        "requestReviewDesc": "Peça ao Fossy para revisar sua PR manualmente adicionando um comentário com o comando `@fossy start-review` na raiz da PR.",
+        "validateBusinessLogic": "Validar Lógica de Negócio",
+        "validateBusinessLogicDesc": "Peça ao Fossy para validar seu código contra regras de negócio adicionando um comentário com o comando `@fossy -v business-logic`.",
+        "provideFeedback": "Fornecer Feedback",
+        "provideFeedbackDesc": "Ajude o Fossy a aprender e melhorar reagindo aos seus comentários com um 👍 para sugestões úteis ou um 👎 se melhorias forem necessárias.",
+        "configurationTitle": "Configuração Atual do Fossy",
+        "reviewOptionsTitle": "Opções de Revisão",
+        "reviewOptionsDesc": "As seguintes opções de revisão estão habilitadas ou desabilitadas:",
+        "tableOptions": "Opções",
+        "tableEnabled": "Habilitado",
+        "configurationLink": "Acesse suas configurações aqui.",
+        "enabled": "✅",
+        "disabled": "❌"
+    },
+    "discordFormatter": {
+        "title": "📦 Métricas de Engenharia",
+        "legend": {
+            "title": "Legenda dos resultados",
+            "same": "Significa que o resultado permaneceu o __mesmo__",
+            "improved": "Significa que o resultado __melhorou__",
+            "worsened": "Significa que o resultado __piorou__"
+        },
+        "flowMetrics": {
+            "title": "Métricas de Fluxo",
+            "leadTime": {
+                "title": "Lead Time",
+                "description": "O tempo que uma atividade leva para ir do status ${todo} até o status ${done}."
+            },
+            "leadTimeInWip": {
+                "title": "Lead Time em WIP",
+                "description": "O tempo que uma atividade leva para ir do status ${wip} até o status ${done}."
+            },
+            "throughput": {
+                "title": "Throughput",
+                "description": "Número de itens que chegaram ao status ${done} nos últimos 7 dias.",
+                "items": "itens"
+            },
+            "bugRatio": {
+                "title": "Bug Ratio",
+                "description": "Número de bugs em WIP em relação ao total de atividades em WIP, nos últimos 7 dias."
+            },
+            "leadTimeByColumn": {
+                "title": "Lead Time por Coluna",
+                "description": "Tempo que um item passa em *P75* em cada status do seu quadro."
+            }
+        },
+        "doraMetrics": {
+            "title": "Métricas DORA",
+            "deployFrequency": {
+                "title": "Frequência de Deploy",
+                "description": "Frequência de deploy na semana.",
+                "value": "${value} deploys por semana"
+            },
+            "leadTimeForChange": {
+                "title": "Lead Time for Changes",
+                "description": "Tempo médio do primeiro commit até o merge do PR.",
+                "value": "${value} dias"
+            }
+        },
+        "percentiles": {
+            "p50": "P50 (Otimista)",
+            "p75": "P75 (Confiante)",
+            "p95": "P95 (Pessimista)"
+        }
+    },
+    "reviewCadenceInfo": {
+        "automaticTitle": "Review Automático",
+        "automaticDesc": "Fossy revisa esta PR automaticamente em cada push.",
+        "autoPauseTitle": "Modo Auto-Pause",
+        "autoPauseDesc": "Fossy revisa automaticamente mas pausa após mudanças rápidas ({pushes}+ pushes em {timeWindow} minutos). Use @fossy start-review para continuar.",
+        "manualTitle": "Review Manual",
+        "manualDesc": "Fossy revisa o primeiro push automaticamente, depois apenas quando você solicita com @fossy start-review."
+    }
+}

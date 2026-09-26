@@ -1,0 +1,8 @@
+{
+    "providerType": "fossa-github-issues",
+    "capability": "task.context.read",
+    "tools": [
+        "FOSSA_GET_ISSUE",
+        "FOSSA_LIST_ISSUES"
+    ]
+}

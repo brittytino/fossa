@@ -1,0 +1,124 @@
+---
+title: "Troubleshooting"
+description: "Common Fossa CLI errors, exit codes, and how to debug them."
+---
+
+Start any investigation with:
+
+```bash
+fossa status
+fossa auth status
+fossa review --verbose    # or any command with --verbose
+```
+
+`fossa status` shows the consolidated state (auth mode, org, repo, hook, version). `--verbose` prints the resolved API URL and per-request details.
+
+## Common Errors
+
+<AccordionGroup>
+  <Accordion title="Command not found: fossa">
+    The CLI isn't on your `PATH`. Reinstall with your package manager's global flag, or use `npx @fossa/cli <command>` for one-off runs.
+
+    - `npm install -g @fossa/cli`
+    - `yarn global add @fossa/cli`
+    - `pnpm add -g @fossa/cli`
+    - `bun add -g @fossa/cli`
+
+    If you installed via the skill installer, re-run `curl -fsSL https://review-skill.com/install | bash` to fix PATH entries.
+  </Accordion>
+
+  <Accordion title="AUTH_REQUIRED or 401 Unauthorized">
+    - Run `fossa auth status` to see the current mode.
+    - If using a team key, verify it's still active at <a href="https://app.fossa.local/organization/cli-keys" target="_blank">app.fossa.local/organization/cli-keys</a>.
+    - If using personal login, try `fossa auth login` again — the refresh token may have expired.
+    - For CI, confirm `FOSSA_TOKEN` (or `FOSSA_TEAM_KEY`) is set in the environment the pipeline runs in.
+    - If self-hosted, confirm `FOSSA_API_URL` points to the correct instance.
+  </Accordion>
+
+  <Accordion title="NOT_IN_GIT_REPO">
+    `fossa review` requires a git working directory. `cd` into a repo or initialize one with `git init`. For `fossa config repo` commands, you can pass `owner/repo` explicitly instead of `.`.
+  </Accordion>
+
+  <Accordion title="Review takes very long or seems to hang">
+    Large branches (hundreds of files, thousands of lines) can take several minutes. The default request timeout is 60 minutes — you should see progress in verbose mode.
+
+    - Use `--verbose` to confirm the request is in flight.
+    - For very large diffs, prefer `--branch <base>` or `--commit <sha>` over working-tree mode: these let the backend clone the same commit instead of receiving inlined file contents.
+    - Override the timeout with `FOSSA_REQUEST_TIMEOUT_MIN=90 fossa review` if needed.
+    - Split work across smaller branches when practical.
+  </Accordion>
+
+  <Accordion title="Files are being skipped from the review">
+    Review honors the `ignore-files` patterns configured in `fossa config repo`. List current settings with:
+
+    ```bash
+    fossa config repo show
+    ```
+
+    You can add or remove patterns:
+
+    ```bash
+    fossa config repo add-ignore-file . "**/*.generated.ts"
+    fossa config repo remove-ignore-file . "**/*.generated.ts"
+    ```
+
+    Binary files, images, and lockfiles are skipped by default.
+  </Accordion>
+
+  <Accordion title="Rate limit reached / Trial exhausted">
+    Trial mode allows 5 reviews per day. Sign in with `fossa auth login` or configure a team key via `fossa auth team-key --key fossa_xxxxx` to raise limits. `fossa auth status` prints your current usage.
+  </Accordion>
+
+  <Accordion title="API returned invalid response (expected JSON, got HTML)">
+    Your `FOSSA_API_URL` is hitting a reverse proxy or Cloudflare Access page instead of the API. Check:
+
+    - The URL path (no stray `/api`, `/v1`, etc.).
+    - Cloudflare Access credentials (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`) if applicable.
+    - That the proxy forwards `Authorization` and `CF-Access-*` headers intact.
+  </Accordion>
+
+  <Accordion title="HTTPS required for API URL">
+    The CLI rejects non-HTTPS API URLs for everything except `localhost` and `127.0.0.1`. Provision a valid TLS certificate for your self-hosted instance, or use `http://localhost:<port>` for local development.
+  </Accordion>
+
+  <Accordion title="Pre-push hook is not running">
+    - Confirm installation: `fossa hook status`.
+    - Make sure `.git/hooks/pre-push` is executable.
+    - Other hook managers (Husky, Lefthook, pre-commit) may overwrite `.git/hooks/pre-push`. Either chain them or reinstall with `fossa hook install --force`.
+    - Skip the hook for a single push: `FOSSA_SKIP_HOOK=1 git push`.
+  </Accordion>
+
+  <Accordion title="Device limit reached">
+    Self-hosted instances can enforce device limits per organization. Ask your admin to increase the limit or remove unused devices from the dashboard.
+  </Accordion>
+</AccordionGroup>
+
+## Exit Codes
+
+Use these in scripts and CI pipelines.
+
+| Code | Meaning                                                                |
+| ---- | ---------------------------------------------------------------------- |
+| `0`  | Success. No issues found, or issues were found but below `--fail-on`. |
+| `1`  | Issues found at or above the `--fail-on` severity.                     |
+| `2`  | CLI usage error (invalid flag, missing argument).                      |
+| `3`  | Authentication or authorization failure.                               |
+| `4`  | Network or API error (timeout, 5xx, invalid response).                 |
+| `5`  | Not in a git repository, or no changes to review.                      |
+
+<Tip>
+  For CI, pair `--fail-on error` with `--format json` and `--output review.json` to surface structured results as pipeline artifacts without affecting the exit code logic.
+</Tip>
+
+## Debugging Tips
+
+- **`--verbose` on any command** prints the resolved API URL, request IDs, and timings.
+- **`fossa schema`** outputs the machine-readable command schema — useful when your agent reports a missing flag.
+- **`--agent`** enforces deterministic, machine-readable output; combine with `--format json` when scripting.
+- **`FOSSA_VERBOSE=true`** persists verbose mode across multiple commands in a session.
+
+## Getting Help
+
+- Report bugs: [github.com/brittytino/cli/issues](https://github.com/brittytino/cli/issues)
+- Feature requests, configuration questions: your Fossa account manager, or `support@fossa.local`.
+- For self-hosted deployments, include `fossa status --verbose` output when filing an issue.

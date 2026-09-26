@@ -1,0 +1,335 @@
+import { createHmac, timingSafeEqual } from 'crypto';
+
+import { createLogger } from '@libs/core/log/logger';
+import { Controller, HttpStatus, Post, Req, Res } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Request, Response } from 'express';
+
+import { Public } from '@libs/identity/infrastructure/adapters/services/auth/public.decorator';
+import { NotificationService } from '@libs/notifications/application/notification.service';
+import { NotificationEvent } from '@libs/notifications/domain/catalog/events';
+
+/**
+ * Express request shape with the raw-body capture from
+ * `apps/webhooks/src/main.ts` body-parser verify hook. The HMAC must
+ * cover the bytes the billing service signed, not a re-stringified
+ * copy of the parsed body (which would be subject to key ordering /
+ * whitespace differences).
+ */
+type WebhookRequest = Request & { rawBody?: Buffer };
+
+const SIGNATURE_HEADER = 'x-fossa-signature';
+
+interface PaymentFailedBody {
+    organizationId?: string;
+    amount?: number;
+    currency?: string;
+    failureReason?: string;
+    nextRetryAt?: string;
+    updatePaymentUrl?: string;
+}
+
+interface TrialExpiringBody {
+    organizationId?: string;
+    trialEndsAt?: string;
+    daysRemaining?: number;
+    upgradeUrl?: string;
+}
+
+interface PlanChangedBody {
+    organizationId?: string;
+    teamId?: string;
+    planType?: string;
+    subscriptionStatus?: string;
+}
+
+interface CreditsPurchasedBody {
+    organizationId?: string;
+    teamId?: string;
+    creditUsd?: number;
+    balanceUsd?: number;
+}
+
+interface CreditsLowBody {
+    organizationId?: string;
+    teamId?: string;
+    balanceUsd?: number;
+    thresholdUsd?: number;
+    exhausted?: boolean;
+}
+
+const TOP_UP_URL = 'https://app.fossa.local/byok#fossa';
+
+/**
+ * LEGACY path for fossa-service-billing notifications. Billing now calls
+ * the API's `/billing/events/*` (BillingEventsController); this copy only
+ * keeps callbacks flowing while an older billing deploy still targets
+ * `/billing/webhook/*`. Delete it once billing is deployed (#2007).
+ *
+ * Receives outbound notifications from fossa-service-billing.
+ *
+ * The billing service signs the raw request body with HMAC-SHA256
+ * keyed by `API_BILLING_WEBHOOK_SECRET`. Invalid / missing signatures
+ * return 401. Valid requests emit the corresponding notification with
+ * `role:OWNER + role:BILLING_MANAGER` as the audience.
+ *
+ * The endpoint is intentionally tolerant of notification-side failures
+ * — when `notificationService.emit` throws (outbox down, etc.) we
+ * still return 200 so the billing service doesn't retry forever. The
+ * failure is logged for ops; the billing state is already committed
+ * upstream regardless.
+ */
+@Public()
+@Controller('billing/webhook')
+export class BillingController {
+    private readonly logger = createLogger(BillingController.name);
+
+    constructor(
+        private readonly notificationService: NotificationService,
+        private readonly configService: ConfigService,
+    ) {}
+
+    @Post('/payment-failed')
+    async paymentFailed(
+        @Req() req: WebhookRequest,
+        @Res() res: Response,
+    ): Promise<Response> {
+        const verification = this.verifySignature(req);
+        if (verification.status !== 'ok') {
+            return res.status(verification.status).send(verification.reason);
+        }
+
+        const body = req.body as PaymentFailedBody;
+        if (!body?.organizationId) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .send('Missing organizationId');
+        }
+
+        await this.safeEmit(() =>
+            this.notificationService.emit({
+                event: NotificationEvent.BILLING_PAYMENT_FAILED,
+                payload: {
+                    amount: body.amount ?? 0,
+                    currency: body.currency ?? '',
+                    failureReason:
+                        body.failureReason ?? 'Unknown payment failure',
+                    nextRetryAt: body.nextRetryAt,
+                    updatePaymentUrl: body.updatePaymentUrl,
+                },
+                organizationId: body.organizationId,
+            }),
+        );
+
+        return res.status(HttpStatus.OK).send('ok');
+    }
+
+    @Post('/trial-expiring')
+    async trialExpiring(
+        @Req() req: WebhookRequest,
+        @Res() res: Response,
+    ): Promise<Response> {
+        const verification = this.verifySignature(req);
+        if (verification.status !== 'ok') {
+            return res.status(verification.status).send(verification.reason);
+        }
+
+        const body = req.body as TrialExpiringBody;
+        if (!body?.organizationId) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .send('Missing organizationId');
+        }
+
+        await this.safeEmit(() =>
+            this.notificationService.emit({
+                event: NotificationEvent.BILLING_TRIAL_EXPIRING,
+                payload: {
+                    trialEndsAt: body.trialEndsAt ?? '',
+                    daysRemaining: body.daysRemaining ?? 0,
+                    upgradeUrl: body.upgradeUrl,
+                },
+                organizationId: body.organizationId,
+            }),
+        );
+
+        return res.status(HttpStatus.OK).send('ok');
+    }
+
+    @Post('/plan-changed')
+    async planChanged(
+        @Req() req: WebhookRequest,
+        @Res() res: Response,
+    ): Promise<Response> {
+        const verification = this.verifySignature(req);
+        if (verification.status !== 'ok') {
+            return res.status(verification.status).send(verification.reason);
+        }
+
+        const body = req.body as PlanChangedBody;
+        if (!body?.organizationId) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .send('Missing organizationId');
+        }
+
+        // Acknowledge only: the Fossy Rules sync lives in the API's
+        // BillingEventsController, because this ingestion service must not
+        // boot the Fossy Rules graph and Mongo (#2007). Until billing moves,
+        // rules still reconcile before every review (codeBaseConfig.service.ts)
+        // and on list reads (FossyRulesService.find).
+        this.logger.log({
+            message: 'Billing plan-changed webhook acknowledged',
+            context: BillingController.name,
+            metadata: {
+                organizationId: body.organizationId,
+                planType: body.planType,
+                subscriptionStatus: body.subscriptionStatus,
+            },
+        });
+
+        return res.status(HttpStatus.OK).send('ok');
+    }
+
+    /**
+     * Verifies the X-Fossa-Signature header against the raw request
+     * body using HMAC-SHA256 with the shared secret. Constant-time
+     * comparison so timing attacks can't enumerate valid bytes.
+     */
+    // ── Prepaid credits ("Fossa as the provider") ────────────────────────
+
+    @Post('/credits-purchased')
+    async creditsPurchased(
+        @Req() req: WebhookRequest,
+        @Res() res: Response,
+    ): Promise<Response> {
+        const verification = this.verifySignature(req);
+        if (verification.status !== 'ok') {
+            return res.status(verification.status).send(verification.reason);
+        }
+
+        const body = req.body as CreditsPurchasedBody;
+        if (!body?.organizationId) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .send('Missing organizationId');
+        }
+
+        await this.safeEmit(() =>
+            this.notificationService.emit({
+                event: NotificationEvent.CREDITS_PURCHASED,
+                payload: {
+                    creditUsd: Number(body.creditUsd ?? 0),
+                    balanceUsd: Number(body.balanceUsd ?? 0),
+                },
+                organizationId: body.organizationId,
+            }),
+        );
+
+        return res.status(HttpStatus.OK).send('ok');
+    }
+
+    /** One webhook, two events: `exhausted` (balance ≤ 0, critical, sticky
+     *  banner) vs `low` (under the threshold, informational). The billing
+     *  service fires each once per crossing, so no rate limiting here. */
+    @Post('/credits-low')
+    async creditsLow(
+        @Req() req: WebhookRequest,
+        @Res() res: Response,
+    ): Promise<Response> {
+        const verification = this.verifySignature(req);
+        if (verification.status !== 'ok') {
+            return res.status(verification.status).send(verification.reason);
+        }
+
+        const body = req.body as CreditsLowBody;
+        if (!body?.organizationId) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .send('Missing organizationId');
+        }
+
+        const balanceUsd = Number(body.balanceUsd ?? 0);
+        await this.safeEmit(() =>
+            body.exhausted
+                ? this.notificationService.emit({
+                      event: NotificationEvent.CREDITS_EXHAUSTED,
+                      payload: { balanceUsd, topUpUrl: TOP_UP_URL },
+                      organizationId: body.organizationId!,
+                  })
+                : this.notificationService.emit({
+                      event: NotificationEvent.CREDITS_LOW,
+                      payload: {
+                          balanceUsd,
+                          thresholdUsd: Number(body.thresholdUsd ?? 0),
+                          topUpUrl: TOP_UP_URL,
+                      },
+                      organizationId: body.organizationId!,
+                  }),
+        );
+
+        return res.status(HttpStatus.OK).send('ok');
+    }
+
+    private verifySignature(
+        req: WebhookRequest,
+    ): { status: 'ok' } | { status: HttpStatus; reason: string } {
+        const secret = this.configService.get<string>(
+            'API_BILLING_WEBHOOK_SECRET',
+        );
+        if (!secret) {
+            this.logger.error({
+                message:
+                    'API_BILLING_WEBHOOK_SECRET is not configured — refusing billing webhook',
+                context: BillingController.name,
+            });
+            return {
+                status: HttpStatus.INTERNAL_SERVER_ERROR,
+                reason: 'Webhook secret not configured',
+            };
+        }
+
+        const provided = req.headers[SIGNATURE_HEADER] as string | undefined;
+        if (!provided) {
+            return {
+                status: HttpStatus.UNAUTHORIZED,
+                reason: 'Missing signature',
+            };
+        }
+
+        const rawBody =
+            req.rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
+        const expected = createHmac('sha256', secret)
+            .update(rawBody)
+            .digest('hex');
+
+        const a = Buffer.from(provided);
+        const b = Buffer.from(expected);
+        if (a.length !== b.length || !timingSafeEqual(a, b)) {
+            return {
+                status: HttpStatus.UNAUTHORIZED,
+                reason: 'Invalid signature',
+            };
+        }
+
+        return { status: 'ok' };
+    }
+
+    /**
+     * Wrap the emit so notification-side failures never propagate to
+     * the billing service. If emit throws, we log and return — the
+     * caller (Stripe → billing → us) sees a 200 and won't retry.
+     */
+    private async safeEmit(fn: () => Promise<void>): Promise<void> {
+        try {
+            await fn();
+        } catch (error) {
+            this.logger.error({
+                message: 'Failed to emit billing notification',
+                error:
+                    error instanceof Error ? error : new Error(String(error)),
+                context: BillingController.name,
+            });
+        }
+    }
+}

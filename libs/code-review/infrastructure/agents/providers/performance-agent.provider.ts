@@ -1,0 +1,56 @@
+import { Injectable, Optional } from '@nestjs/common';
+import { PermissionValidationService } from '@libs/shared/infrastructure/permissions';
+import { ObservabilityService } from '@libs/core/log/observability.service';
+import { DocumentationSearchExaService } from '@libs/code-review/infrastructure/adapters/services/documentation-search-exa.service';
+import { ByokErrorCounter } from '@libs/notifications/application/byok-error-counter.service';
+import { BaseCodeReviewAgentProvider } from '@libs/code-review/infrastructure/agents/providers/base-code-review-agent.provider';
+import { ReviewAgentIdentity } from '@libs/code-review/infrastructure/agents/review-agent.contract';
+import { buildCategoryReviewPrompt } from '@libs/code-review/infrastructure/agents/prompts/review-prompt-blocks';
+
+@Injectable()
+export class PerformanceAgentProvider extends BaseCodeReviewAgentProvider {
+    constructor(
+        permissionValidationService: PermissionValidationService,
+        observabilityService: ObservabilityService,
+        @Optional()
+        documentationSearchService?: DocumentationSearchExaService,
+        @Optional()
+        byokErrorCounter?: ByokErrorCounter,
+    ) {
+        super(
+            permissionValidationService,
+            observabilityService,
+            documentationSearchService,
+            byokErrorCounter,
+        );
+    }
+
+    protected getIdentity(): ReviewAgentIdentity {
+        return {
+            name: 'fossa-performance-review-agent',
+            description:
+                'Performance engineering expert specialized in finding N+1 queries, ' +
+                'unnecessary loops, memory leaks, missing caching opportunities, ' +
+                'and hot path allocations in code changes.',
+            goal:
+                'Find real performance issues that would cause noticeable degradation ' +
+                'in production. Verify impact by investigating the codebase context.',
+            expertise: [
+                'Database query optimization (N+1, missing indexes)',
+                'Algorithm complexity analysis',
+                'Memory leak detection',
+                'Caching strategy evaluation',
+                'I/O bottleneck identification',
+                'Hot path optimization',
+            ],
+        };
+    }
+
+    protected getCategoryLabel(): string {
+        return 'performance';
+    }
+
+    protected getCategoryPrompt(): string {
+        return buildCategoryReviewPrompt('performance');
+    }
+}

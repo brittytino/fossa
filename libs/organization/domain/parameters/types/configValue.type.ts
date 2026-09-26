@@ -1,0 +1,123 @@
+import { LanguageValue } from '@libs/core/domain/enums/language-parameter.enum';
+import { ParametersKey } from '@libs/core/domain/enums/parameters-key.enum';
+import { CodeReviewParameter } from '@libs/core/infrastructure/config/types/general/codeReviewConfig.type';
+
+type DayOfWeek = 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat';
+
+type BooleanMap<T extends string> = {
+    [key in T]: boolean;
+};
+
+type CheckinFrequency = BooleanMap<DayOfWeek>;
+
+type SessionFrequency = 'daily' | 'weekly';
+
+export type SectionType =
+    | 'releaseNotes'
+    | 'pullRequestsOpened'
+    | 'lateWorkItems'
+    | 'teamArtifacts'
+    | 'teamDoraMetrics'
+    | 'teamFlowMetrics';
+
+type Section = {
+    id: SectionType;
+    active: boolean;
+    order: number;
+    additionalConfig?: {
+        frequency?: SessionFrequency;
+    };
+};
+
+type SectionConfig = {
+    [key in SectionType]?: Section;
+};
+
+export type CheckinConfigValue = {
+    checkinId: string;
+    checkinName: string;
+    frequency: CheckinFrequency;
+    sections: SectionConfig;
+    checkinTime: string;
+};
+
+export type PlatformConfigValue = {
+    finishOnboard: boolean;
+    finishProjectManagementConnection: boolean;
+    fossyLearningStatus: FossyLearningStatus;
+    /**
+     * Consecutive rule-generation runs that hard-crashed before completing
+     * — bumped when entering `GENERATING_RULES`, reset to 0 on any
+     * completion. The FossyLearning cron stops retrying once this reaches
+     * `MAX_STUCK_RETRIES`.
+     */
+    fossyLearningStuckRetries?: number;
+};
+
+export enum FossyLearningStatus {
+    ENABLED = 'enabled',
+    DISABLED = 'disabled',
+    GENERATING_RULES = 'generating_rules',
+    GENERATING_CONFIG = 'generating_config',
+}
+
+export type CentralizedConfigActivePullRequest = {
+    prUrl: string;
+    prNumber?: number;
+    sourceBranch: string;
+    targetBranch?: string;
+    repository: {
+        id: string;
+        name: string;
+    };
+    createdAt: string;
+    updatedAt: string;
+};
+
+export type CentralizedConfigParameter = {
+    enabled: boolean;
+    repository: {
+        name: string;
+        id: string;
+    } | null;
+    activePullRequest?: CentralizedConfigActivePullRequest | null;
+
+    /**
+     * Repositories whose config the centralized repo actually owns, as recorded
+     * by the last successful sync. Stale cleanup needs this to tell "this repo
+     * never had a `fossa-config.yml`, it just inherits the global one" from
+     * "its `fossa-config.yml` was deleted". `undefined` means no sync has
+     * recorded a baseline yet — absence proves nothing, so nothing is removed.
+     */
+    managedRepositoryIds?: string[];
+
+    /**
+     * Per-repository directory scopes the centralized repo owns, keyed by
+     * repository id and holding the encoded group folder names
+     * (`buildGroupFolderName`) the last successful sync wrote.
+     *
+     * Ownership is tracked per SCOPE, not per repository, because reconciling
+     * directories by repository is wrong in both directions: a repository
+     * whose only file is a directory scope is absent from
+     * `managedRepositoryIds` entirely (its scope could never be cleaned up),
+     * while a repository present only through `.fossy-rules` files looks
+     * managed and says nothing about directories (its UI-created scopes all
+     * looked stale). A directory is removable only when a previous sync
+     * owned that directory.
+     */
+    managedDirectoryScopes?: Record<string, string[]>;
+
+    /** Same idea for the global `fossa-config.yml`. */
+    managedGlobalConfig?: boolean;
+};
+
+interface KnownConfigs {
+    [ParametersKey.CODE_REVIEW_CONFIG]: CodeReviewParameter;
+    [ParametersKey.LANGUAGE_CONFIG]: LanguageValue;
+    [ParametersKey.PLATFORM_CONFIGS]: PlatformConfigValue;
+    [ParametersKey.CENTRALIZED_CONFIG]: CentralizedConfigParameter;
+}
+
+export type ConfigValueMap = {
+    [K in ParametersKey]: K extends keyof KnownConfigs ? KnownConfigs[K] : any;
+};

@@ -1,0 +1,176 @@
+# ==============================================================================
+# Docker Compose for Self-Hosted Production Environment
+# ==============================================================================
+# This file is intended for users who want to run the application on their own
+# infrastructure. It uses pre-built images from the GitHub Container Registry.
+#
+# Usage:
+# 1. Create a `.env.prod` file by copying `.env.example`.
+# 2. Fill in the required environment variables in `.env.prod`.
+# 3. Run `ENV_FILE=.env.prod docker compose -f docker-compose.prod.yml up -d`.
+# ==============================================================================
+
+services:
+    #----------------------------------------------------------------
+    # Application Services
+    #----------------------------------------------------------------
+    api:
+        image: ghcr.io/brittytino/fossa-api:${FOSSA_VERSION:-latest}
+        container_name: fossa_api_prod
+        restart: unless-stopped
+        command: node dist/apps/api/main.js
+        env_file:
+            - ${ENV_FILE:-.env.prod}
+        environment:
+            - API_CLOUD_MODE=false
+            - COMPONENT_TYPE=api
+        ports:
+            - '3331:3001'
+        depends_on:
+            db_postgres:
+                condition: service_healthy
+            db_mongodb:
+                condition: service_healthy
+        networks:
+            - fossa-backend-services
+
+    worker:
+        image: ghcr.io/brittytino/fossa-worker:${FOSSA_VERSION:-latest}
+        container_name: fossa_worker_prod
+        restart: unless-stopped
+        command: node dist/apps/worker/main.js
+        env_file:
+            - ${ENV_FILE:-.env.prod}
+        environment:
+            - API_CLOUD_MODE=false
+            - COMPONENT_TYPE=worker
+            - WORKER_ROLE=code-review
+        depends_on:
+            db_postgres:
+                condition: service_healthy
+            db_mongodb:
+                condition: service_healthy
+        networks:
+            - fossa-backend-services
+
+    worker-analytics:
+        image: ghcr.io/brittytino/fossa-worker:${FOSSA_VERSION:-latest}
+        container_name: fossa_analytics_worker_prod
+        restart: unless-stopped
+        command: node dist/apps/worker/main.js
+        env_file:
+            - ${ENV_FILE:-.env.prod}
+        environment:
+            - API_CLOUD_MODE=false
+            - COMPONENT_TYPE=worker
+            - WORKER_ROLE=analytics
+        depends_on:
+            db_postgres:
+                condition: service_healthy
+            db_mongodb:
+                condition: service_healthy
+        networks:
+            - fossa-backend-services
+
+    webhooks:
+        image: ghcr.io/brittytino/fossa-webhook:${FOSSA_VERSION:-latest}
+        container_name: fossa_webhooks_prod
+        restart: unless-stopped
+        command: node dist/apps/webhooks/main.js
+        env_file:
+            - ${ENV_FILE:-.env.prod}
+        environment:
+            - API_CLOUD_MODE=false
+            - COMPONENT_TYPE=webhook
+        ports:
+            - '3333:3332'
+        depends_on:
+            db_postgres:
+                condition: service_healthy
+            db_mongodb:
+                condition: service_healthy
+        networks:
+            - fossa-backend-services
+
+    #----------------------------------------------------------------
+    # Web Frontend
+    #----------------------------------------------------------------
+    web:
+        image: ghcr.io/brittytino/fossa-web:${FOSSA_VERSION:-latest}
+        container_name: fossa_web_prod
+        restart: unless-stopped
+        env_file:
+            - ${ENV_FILE:-.env.prod}
+        ports:
+            - '3000:3000'
+        networks:
+            - fossa-backend-services
+
+    #----------------------------------------------------------------
+    # Databases & Infrastructure
+    #----------------------------------------------------------------
+    db_postgres:
+        image: docker.io/pgvector/pgvector:pg16
+        container_name: fossa_postgres_prod
+        restart: unless-stopped
+        env_file:
+            - ${ENV_FILE:-.env.prod}
+        volumes:
+            - pgdata_prod:/var/lib/postgresql/data
+        networks:
+            - fossa-backend-services
+        healthcheck:
+            test:
+                [
+                    'CMD-SHELL',
+                    'pg_isready -U ${API_PG_DB_USERNAME} -d ${API_PG_DB_DATABASE}',
+                ]
+            interval: 5s
+            timeout: 3s
+            retries: 5
+            start_period: 30s
+
+    db_mongodb:
+        # Pinned, not floating. `mongo:8` resolves to a release that refuses
+        # to start on Linux kernels 6.19+: MongoDB 8.0.21-8.0.29 and
+        # 8.3.0-8.3.8 exit during startup with `MongoDB cannot start: Linux
+        # kernel versions 6.19 and newer has a known incompatibility`
+        # (SERVER-121912 - tcmalloc violates the rseq ABI). A floating tag is
+        # how a stack that worked one week stopped booting the next without a
+        # line changing here.
+        #
+        # 8.2.11 is outside that range and verified to start and stay up on
+        # kernel 7.0.14. Revisit when 8.0.30 / 8.3.9 publish, which carry the
+        # real fix. Kept identical to the fossa-installer compose, which
+        # serves the same audience.
+        #
+        # An installation already running 8.3 with its feature compatibility
+        # version raised to 8.3 will not open its data files under this pin
+        # and must set that version back before upgrading.
+        image: docker.io/mongo:8.2.11
+        container_name: fossa_mongodb_prod
+        restart: unless-stopped
+        env_file:
+            - ${ENV_FILE:-.env.prod}
+        volumes:
+            - mongodbdata_prod:/data/db
+        networks:
+            - fossa-backend-services
+        healthcheck:
+            test:
+                [
+                    'CMD-SHELL',
+                    "echo 'db.runCommand({ ping: 1 }).ok' | mongosh --quiet mongodb://$${MONGO_INITDB_ROOT_USERNAME}:$${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin | grep -q 1",
+                ]
+            interval: 5s
+            timeout: 5s
+            retries: 5
+            start_period: 40s
+
+volumes:
+    pgdata_prod:
+    mongodbdata_prod:
+
+networks:
+    fossa-backend-services:
+        driver: bridge

@@ -1,0 +1,58 @@
+import { isByokConfig, type BYOKConfig } from '@libs/llm/byok-config';
+
+/**
+ * Assemble the distinct, non-blank model ids that a spend limit must be able
+ * to price: EVERY model the org configured in its v2 `models[]`, plus any extra
+ * models the caller supplies (e.g. per-repository / per-directory `byokModel`
+ * overrides). native — a legacy / absent / non-config blob contributes no
+ * configured models (only the caller's extras), so the enumeration reflects the
+ * full v2 model set rather than the two collapsed `{main,fallback}` slots.
+ */
+export function collectByokModels(
+    byokConfig?: BYOKConfig | null,
+    extraModels: string[] = [],
+): string[] {
+    const configuredModels = isByokConfig(byokConfig)
+        ? byokConfig.models.map((m) => m.model)
+        : [];
+
+    const candidates = [...configuredModels, ...extraModels];
+
+    return [
+        ...new Set(
+            candidates
+                .map((m) => m?.trim())
+                .filter((m): m is string => Boolean(m)),
+        ),
+    ];
+}
+
+/**
+ * Deep-collect every `byokModel` string in a code-review config value. The
+ * config is stored as untyped jsonb with per-repository and per-directory
+ * overrides at varying depths, so we walk the whole structure rather than rely
+ * on a fixed shape. Returns raw values (not de-duplicated); callers fold them
+ * into `collectByokModels`.
+ */
+export function extractByokModelsFromConfig(configValue: unknown): string[] {
+    const found: string[] = [];
+
+    const walk = (node: unknown): void => {
+        if (Array.isArray(node)) {
+            node.forEach(walk);
+            return;
+        }
+        if (node && typeof node === 'object') {
+            for (const [key, value] of Object.entries(node)) {
+                if (key === 'byokModel' && typeof value === 'string') {
+                    found.push(value);
+                } else {
+                    walk(value);
+                }
+            }
+        }
+    };
+
+    walk(configValue);
+    return found;
+}

@@ -1,0 +1,216 @@
+id: full
+description: |
+    Full tier — strict superset of fast.yml plus the lifecycle scenarios
+    (upgrade N-1 → N, SSO cookie-domain + multi-user, Stripe billing).
+    Run before retagging an RC to the customer-visible semver tag and
+    on a nightly cadence.
+
+    Invariant: every scenario AND cell in fast.yml is also here. If you
+    add something to fast.yml, mirror it here too — otherwise we ship
+    RCs that passed PR checks but were never exercised in the release
+    gate.
+
+# Order matters: onboarding-webhook-registration runs first per cell —
+# if the provider's webhook isn't registered after onboarding, every
+# downstream scenario times out instead of failing fast.
+scenarios:
+    # ----- mirrors fast.yml (keep in sync) -----
+    - onboarding-webhook-registration
+    - code-review-basic
+    # @fossy review / @fossy start-review command path. Disables
+    # automatedReviewActive at the org level first, then opens a PR
+    # and posts the comment, so the review under test can only come
+    # from the command. Covers all 4 providers.
+    - command-review
+    # @fossy review <directive> — the focus-steering path. Same command
+    # flow as command-review but with trailing free-text after the
+    # command; guards that the directive parsing/forwarding (added across
+    # all 5 webhook handlers) doesn't break command detection on any
+    # platform, and that the review still fires. Full-tier only — it's a
+    # second real review per cell, too heavy for the PR-check fast tier.
+    - command-review-focus
+    # `@fossy review` posted while a review ALREADY holds the PR. The
+    # inverse of command-review, which waits for the in-flight automation
+    # to settle first — that wait is right for a test and hid the fact
+    # that a colliding command was refused and never retried (#1700).
+    # Leaves auto-review ON so the collision window is minutes wide and
+    # deterministic on every provider, rather than the ~3s race that only
+    # ever fired on bitbucket (#1699). Full-tier only: a second real
+    # review per cell plus deferral backoff before it gets its turn.
+    - command-review-while-busy
+    - fossy-rules-create-and-apply
+    # Repo-file rule sync (customer case): .fossy/rules template imported
+    # verbatim + multi-glob path enforced on a file matching the 2nd glob.
+    # github-only (needs mergePR).
+    - fossy-rules-file-sync
+    - fossy-rules-lifecycle
+    # Detection semantics (no review step, cheap): root AGENTS.md,
+    # nested CLAUDE.md scoped to its subdir, lowercase claude.md.
+    - rule-file-detection
+    # Cross-process event delivery: execution updates emitted in the worker
+    # must reach the API's SSE stream (CrossProcessEventsBridge).
+    - pr-execution-sse
+    # Multi-site coverage guard for the sharded fossy-rules rewrite (#1449):
+    # a rule violated at several sites in one PR must be flagged at every
+    # site, not just one (the failure mode of the old agentic agent).
+    - fossy-rules-coverage
+    # Centralized config (config-as-code) init→sync→disable on a throwaway org.
+    # github × {paid, license-paid}; skipped unless CENTRALIZED_CONFIG_TEST_REPO is set.
+    - centralized-config-sync
+    - license-attribution
+    # Trial coverage (cloud × github × trial): fresh org per run (14-day
+    # window never lapses). entitlement-gate = fast API check;
+    # managed-review = throwaway repo + real managed-LLM review (the only
+    # cell on Fossa-managed keys). See fast.yml for the full rationale.
+    - trial-entitlement-gate
+    - trial-credits-consume
+    - fossa-credits-gate
+    #   * fossa-credits-review: the WHOLE credit loop, live — a real
+    #     Fossa-routed review on a throwaway repo, the metering sweep
+    #     journaling its spans, the ledger debited per charge, then the
+    #     balance drained so `@fossy review` is blocked. It is the only cell
+    #     that can catch a metering or pricing regression (the gate cell
+    #     stops at the contract). Nightly only: ~10-25 min, one real review.
+    #     Reports SKIPPED with the exact reason unless the environment has
+    #     (a) the provider enabled for the org — API_FOSSA_PROVIDER_ALPHA_ORGS
+    #     or the `fossa-provider` PostHog flag + an alpha release track,
+    #     (b) API_FOSSA_PROVIDER_FIREWORKS_API_KEY (the routed models run on
+    #     it), and (c) BILLING_ADMIN_BASE_URL + BILLING_ADMIN_TOKEN, which is
+    #     how a balance is seeded without going through Stripe.
+    - fossa-credits-review
+    - trial-managed-review
+    # Per-seat gate: appliesTo restricts to self-hosted × github × license-paid
+    # (one cell). Skipped automatically when SH_LICENSE_KEY_PATH (default
+    # ~/.fossa-dev/license-seats1.jwt) isn't available — see run-matrix.ts.
+    - per-seat-license-toggle
+
+    # ----- lifecycle scenarios that justify the full tier -----
+    - upgrade-n-1-to-n
+    # SSO cookie-domain regression. Restricted by appliesTo to a single
+    # cell (self-hosted × github × license-paid); spins up its own
+    # dedicated droplet (--name sso-e2e) with Caddy + Keycloak on
+    # sslip.io. Full-only because LE issuance + droplet boot adds
+    # ~7-8 min on first run. Validated end-to-end on 2026-05-19.
+    - sso-cookie-domain
+    # SSO multi-user flows (admin SSO login + sign-in CTA + new-user
+    # signup via SSO + removed-user rejection). Reuses the
+    # `sso-e2e` droplet — runs after sso-cookie-domain so the second
+    # cell skips droplet provisioning entirely.
+    - sso-multi-user
+    # Stripe billing lifecycle (Checkout, Portal, downgrade). Cloud-only
+    # via dedicated tenants seeded by setup-tenants.ts; test mode so the
+    # card 4242 4242 4242 4242 completes synchronously, then we poll the
+    # billing API until the webhook lands.
+    - stripe-billing
+    # RBAC authorization matrix (also in fast.yml). Signs up a throwaway org,
+    # provisions one user per role, asserts 200/403 across API endpoints.
+    - rbac-authorization
+    # RBAC frontend route guard (also in fast.yml): per role, next-auth HTTP
+    # sign-in + asserts the middleware /forbidden redirects per the route
+    # manifest.
+    - rbac-frontend-routes
+    # RBAC UI render (real browser, full-only like stripe-billing): drives
+    # Chromium per role and asserts the Token Usage menu item + /token-usage
+    # screen actually RENDER, and denied roles get a rendered /forbidden page.
+    - rbac-ui-render
+    # Cockpit analytics availability (real browser): warehouse-up API probe +
+    # /cockpit page not gated behind the vestigial WEB_ANALYTICS_SECRET. Runs
+    # on cloud (paid/trial) and self-hosted (license-paid) github cells via
+    # appliesTo; browser layer self-skips on non-cockpit tiers.
+    - cockpit-analytics
+    # Public PR-review demo API (also in fast.yml). Anonymous, cloud-only;
+    # appliesTo pins it to one cell (cloud × github × paid).
+    - public-pr-demo
+    # Prior-round decision memory (#1313, also in fast.yml). github-only —
+    # needs pushFollowupCommit + listReviewCommentBodies.
+    - review-decision-memory
+    # Negative-control counterpart (also in fast.yml): memory must not
+    # over-suppress a genuinely reverted fix.
+    - review-decision-memory-revert
+    # Fossy Rules path counterpart (also in fast.yml): exercises the separate
+    # rules-judge code path, not the bug/security/performance finder.
+    - review-decision-memory-fossy-rules
+    # Claude-on-Vertex BYOK on BOTH engines (self-hosted × github only).
+    # Full-tier, not fast: needs a GCP service account + a Model-Garden-enabled
+    # Claude model (real LLM cost). Each SKIPS (not fails) when its secret is
+    # absent, so runners without Vertex wired stay green.
+    #   * code-review-vertex-byok: the review path (AI SDK).
+    #     Needs VERTEX_SA_JSON (+ optional VERTEX_REGION/VERTEX_MODEL).
+    #   * conversation-vertex-byok: the conversation agent (same AI SDK stack,
+    #     different routing task) — @fossy mention. Also needs
+    #     CONVERSATION_USER_TOKEN (a non-"fossy/fossa" GitHub account with PR
+    #     R/W on the fixture repo).
+    - code-review-vertex-byok
+    - conversation-vertex-byok
+
+cells:
+    # ---------- self-hosted ----------
+    # NOTE: self-hosted github stays on a PAT, and that is a constraint, not a
+    # preference.
+    #
+    # A GitHub App's webhook URL is configured ONCE at App-registration level
+    # and GitHub delivers to it for every installation. Self-hosted cells boot
+    # an ephemeral droplet behind a fresh cloudflared tunnel each run, so an
+    # App would deliver events to whatever URL the App happens to point at —
+    # not to this run's stack. Making it work needs either PATCH /app/hook/config
+    # per run (which serialises every self-hosted cell onto one App) or a
+    # repo-level hook created by the installation. Until one of those exists,
+    # the PAT is the only auth mode that can receive events here.
+    #
+    # The quota pain is already halved regardless: the HARNESS drives on an App
+    # installation token (see runner.ts), so only the product's integration
+    # credential and PR authorship still spend PAT budget.
+    - target: self-hosted
+      provider: github
+      license: license-paid
+    - target: self-hosted
+      provider: gitlab
+      license: license-paid
+    - target: self-hosted
+      provider: bitbucket
+      license: license-paid
+    - target: self-hosted
+      provider: azure-devops
+      license: license-paid
+    # ---------- cloud ----------
+    # App on the PAID cell ONLY, and the limit is structural: GitHubAppProvider
+    # pins its whole surface to GH_APP_TEST_REPO and ignores the per-tenant
+    # repoFullName, so every github-app cell would drive the SAME repo. Four
+    # cloud tenants sharing one repo is precisely the 2026-06-03..05 incident
+    # documented in .github/workflows/e2e-cloud.yml — webhook fan-out
+    # collisions and phantom "review never started" flakes.
+    #
+    # Widening this needs one App-installed repo PER TENANT and a provider that
+    # honours it; until then the other tiers stay on PATs.
+    - target: cloud
+      provider: github-app
+      license: paid
+    - target: cloud
+      provider: gitlab
+      license: paid
+    - target: cloud
+      provider: bitbucket
+      license: paid
+    - target: cloud
+      provider: azure-devops
+      license: paid
+    - target: cloud
+      provider: github
+      license: free
+    - target: cloud
+      provider: github
+      license: trial
+    # Community plan: post-trial tenant that configured its own LLM API key
+    # (BYOK). Free in Stripe terms but reviews still work (with the 10-rule
+    # limit). Distinct from `free` (= trial expired, no BYOK, gate blocks).
+    - target: cloud
+      provider: github
+      license: community-byok
+    # PAT canary, cloud side. Same rationale as the self-hosted one: the
+    # cloud auth path (authenticateWithToken) differs from the App path
+    # (authenticateWithCodeOauth), so both need a live check.
+    - target: cloud
+      provider: github
+      license: paid
+      only:
+          - code-review-basic

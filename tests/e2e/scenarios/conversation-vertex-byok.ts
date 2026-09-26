@@ -1,0 +1,160 @@
+import { ensureLicenseSeat } from '../lib/onboarding.js';
+import { readVertexByokEnv, setVertexByok } from '../lib/vertex-byok.js';
+import { resolveConversationUserToken } from '../lib/conversation-user-token.js';
+import type { RunContext, Scenario } from '../lib/types.js';
+
+// Standing-branch fixture (same repo as code-review-vertex-byok). The PR
+// content is irrelevant here — we only need an open PR to talk to Fossy on.
+// `bug/missing-null-check` is only confirmed mirrored on GitHub (see
+// code-review-basic.ts's own placeholder comment for the other providers);
+// `refactor/use-map-storage` is the shared branch already confirmed working
+// across all 5 providers via command-review.ts.
+const FIXTURE_BRANCHES: Record<string, { head: string; base: string }> = {
+    github: { head: 'bug/missing-null-check', base: 'main' },
+    gitlab: { head: 'refactor/use-map-storage', base: 'main' },
+    bitbucket: { head: 'refactor/use-map-storage', base: 'main' },
+    'azure-devops': { head: 'refactor/use-map-storage', base: 'main' },
+};
+
+// `@fossy <question>` (NOT `@fossy review`) is what the webhook handlers match
+// with FOSSY_MENTION_NON_REVIEW_PATTERN to route the comment to the
+// adapter). A review command would take the v5 agent path instead.
+const QUESTION =
+    '@fossy in one short sentence, what does this pull request change?';
+
+/**
+ * Proves Fossy's CONVERSATION path honors a Claude-on-Vertex BYOK key. The
+ * conversation agent (`BaseAgentProvider`) resolves its model through
+ * `resolveTaskSlot` → `LLM.run`, the same AI SDK stack the code-review path
+ * uses — there is no separate engine here anymore, so this scenario is about
+ * routing (does the conversation task pick up the org's Vertex BYOK slot),
+ * not about a distinct execution path. A broken Vertex routing here means
+ * Fossy silently never answers an `@fossy` mention.
+ */
+export const conversationVertexByok: Scenario = {
+    id: 'conversation-vertex-byok',
+    title: 'Fossy answers an @fossy mention using a Claude-on-Vertex BYOK key',
+    priority: 'P2',
+    appliesTo: {
+        target: ['self-hosted'],
+        provider: ['github', 'gitlab', 'bitbucket', 'azure-devops'],
+        license: ['paid', 'license-paid'],
+    },
+    timeoutSec: 1200,
+    async run(ctx: RunContext) {
+        ctx.assert(
+            ctx.tenant,
+            'scenario requires a tenant (set SH_TENANT_EMAIL/_PASSWORD)',
+        );
+        // Skip (not fail) when a required secret is absent — keeps the matrix
+        // green on CI runners that don't have Vertex / the conversation user
+        // wired.
+        const vertex = readVertexByokEnv();
+        if (!vertex) {
+            ctx.skip(
+                'VERTEX_SA_JSON not set — needs a GCP service-account JSON (raw or base64) for a project with Vertex AI on and the Claude model enabled in Model Garden',
+            );
+        }
+
+        // Fossy ignores any comment whose author login/name contains
+        // "fossy"/"fossa" (isFossyComment, LOGIN_KEYWORDS=['fossy','fossa']) —
+        // and every provider's own e2e bot account is named like that. So
+        // the `@fossy` mention MUST be posted by a separate, non-Fossy account.
+        const { token: userToken, missingEnvHint } =
+            resolveConversationUserToken(ctx.provider.name);
+        if (!userToken) {
+            ctx.skip(
+                `${missingEnvHint} not set — needs a token for an account whose login/name does NOT contain 'fossy'/'fossa' (the integration bot's own comments are ignored by Fossy) with PR write access on the fixture repo`,
+            );
+        }
+
+        if (
+            !ctx.provider.openPRFromBranches ||
+            !ctx.provider.pollForFossyReply ||
+            !ctx.provider.postReviewCommentAs
+        ) {
+            throw new Error(
+                `Provider ${ctx.provider.name} does not implement openPRFromBranches/pollForFossyReply/postReviewCommentAs yet`,
+            );
+        }
+
+        const session = await ctx.fossa.login(ctx.tenant!);
+        await ctx.fossa.registerIntegration(session);
+        const repo = await ctx.fossa.registerRepo(session);
+        await ctx.fossa.finishOnboarding(session, repo);
+        await ensureLicenseSeat(ctx.target, session, ctx.provider);
+
+        await setVertexByok(ctx.target.apiBaseUrl, session, vertex!);
+
+        const fixture = FIXTURE_BRANCHES[ctx.provider.name];
+        ctx.assert(
+            fixture,
+            `No FIXTURE_BRANCHES entry for provider ${ctx.provider.name}`,
+        );
+
+        const pr = await ctx.provider.openPRFromBranches({
+            head: fixture!.head,
+            base: fixture!.base,
+            title: `[e2e] conversation-vertex-byok ${ctx.runId.slice(0, 8)}`,
+            body: `Automated PR opened by Fossa E2E run ${ctx.runId} (Claude-on-Vertex conversation: ${vertex!.model} @ ${vertex!.region}). Auto-closed by the scenario.`,
+        });
+
+        try {
+            // Post the @fossy mention AFTER the PR exists, as an inline review
+            // comment (Fossy only answers review comments, not issue comments).
+            // sinceIso brackets the poll so we only see replies after it.
+            const sinceIso = new Date().toISOString();
+            const trigger = await ctx.provider.postReviewCommentAs(
+                pr.number,
+                QUESTION,
+                userToken!,
+            );
+
+            const reply = await ctx.provider.pollForFossyReply(
+                { number: pr.number },
+                { sinceIso, triggerId: trigger.id, timeoutSec: 600 },
+            );
+
+            ctx.assert(
+                reply && reply.body.trim().length > 0,
+                `Fossy never answered the @fossy mention on PR #${pr.number} within 600s (model=${vertex!.model}, region=${vertex!.region}). The conversation agent runs on the v2 langchain engine — suspect Vertex routing on that path, the model not enabled in Model Garden, or the conversation feature disabled for the tenant.`,
+            );
+
+            // A non-empty reply is NOT enough: when thought generation fails
+            // (e.g. the ReActStrategy parser rejecting the model's response),
+            // the agent still POSTS a generic fallback comment. A length-only
+            // check would go green while Fossy is actually broken — which is how
+            // the "Missing or invalid reasoning field" regression hid for weeks.
+            // Reject the fallback text so this scenario detects parse failures.
+            const FALLBACK_MARKERS = [
+                'encountered an error while processing your request',
+                'please try rephrasing your question',
+            ];
+            const loweredReply = reply!.body.toLowerCase();
+            const isFallback = FALLBACK_MARKERS.some((m) =>
+                loweredReply.includes(m),
+            );
+            ctx.assert(
+                !isFallback,
+                `Fossy replied on PR #${pr.number} with the GENERIC ERROR FALLBACK instead of a real answer: "${reply!.body.slice(0, 200)}". This is the @fossy conversation thought-generation/parse failure (model=${vertex!.model}, region=${vertex!.region}), not a successful response.`,
+            );
+
+            return {
+                prNumber: pr.number,
+                prUrl: pr.url,
+                model: vertex!.model,
+                region: vertex!.region,
+                replySample: reply!.body.slice(0, 200),
+                sinceIso,
+            };
+        } finally {
+            try {
+                await ctx.provider.closePR(pr);
+            } catch (err) {
+                // best-effort cleanup
+            }
+        }
+    },
+};
+
+export default conversationVertexByok;

@@ -1,0 +1,215 @@
+import { CloneParamsResolverService } from './services/clone-params-resolver.service';
+import { Module, forwardRef } from '@nestjs/common';
+import { McpCoreModule } from '@libs/mcp-server/mcp-core.module';
+import { PromptsModule } from '../modules/prompts.module';
+import { TraceContextModule } from '@libs/cli-review/trace-context.module';
+
+// Stages
+import { AggregateResultsStage } from './stages/aggregate-result.stage';
+import { CreateFileCommentsStage } from './stages/create-file-comments.stage';
+import { CreatePrLevelCommentsStage } from './stages/create-pr-level-comments.stage';
+import { FetchChangedFilesStage } from './stages/fetch-changed-files.stage';
+import { UpdateCommentsAndGenerateSummaryStage } from './stages/finish-comments.stage';
+import { NotificationModule } from '@libs/notifications/modules/notification.module';
+import { UserCoreModule } from '@libs/identity/modules/user-core.module';
+
+import { RequestChangesOrApproveStage } from './stages/finish-process-review.stage';
+import { InitialCommentStage } from './stages/initial-comment.stage';
+import { BusinessLogicValidationStage } from './stages/business-logic-validation.stage';
+import { ResolveConfigStage } from './stages/resolve-config.stage';
+import { ValidateConfigStage } from './stages/validate-config.stage';
+import { ValidateNewCommitsStage } from './stages/validate-new-commits.stage';
+import { ValidatePrerequisitesStage } from './stages/validate-prerequisites.stage';
+
+// EE Stages
+
+// Interfaces
+import { AgentsModule } from '@libs/agents/modules/agents.module';
+import { AIEngineModule } from '@libs/ai-engine/modules/ai-engine.module';
+import { AutomationModule } from '@libs/automation/modules/automation.module';
+import { PIPELINE_CHECKS_SERVICE_TOKEN } from '@libs/core/infrastructure/pipeline/interfaces/pipeline-checks-service.interface';
+import { ChecksAdapterFactory } from '@libs/core/infrastructure/pipeline/services/checks-adapter.factory';
+import { NullChecksAdapter } from '@libs/core/infrastructure/pipeline/services/null-checks.adapter';
+import { PipelineChecksService } from '@libs/core/infrastructure/pipeline/services/pipeline-checks.service';
+import { WorkflowCoreModule } from '@libs/core/workflow/modules/workflow-core.module';
+import { DistributedLockService } from '@libs/core/workflow/infrastructure/distributed-lock.service';
+import { FileReviewModule } from '../modules/fileReview.module';
+import { PermissionValidationModule } from '@libs/shared/infrastructure/permissions';
+import { FossyFineTuningContextModule } from '@libs/fossyFineTuning/fossyFineTuningContext.module';
+import { FossyRulesModule } from '@libs/fossyRules/modules/fossyRules.module';
+import { OrganizationModule } from '@libs/organization/modules/organization.module';
+import { FeatureGateModule } from '@libs/feature-gate';
+import { OrganizationParametersModule } from '@libs/organization/modules/organizationParameters.module';
+import { ParametersModule } from '@libs/organization/modules/parameters.module';
+import { GithubChecksService } from '@libs/platform/infrastructure/adapters/services/github/github-checks.service';
+import { GithubModule } from '@libs/platform/modules/github.module';
+import { ForgejoChecksService } from '@libs/platform/infrastructure/adapters/services/forgejo/forgejo-checks.service';
+import { ForgejoModule } from '@libs/platform/modules/forgejo.module';
+import { PlatformModule } from '@libs/platform/modules/platform.module';
+import { SandboxSyntaxValidator } from '../infrastructure/adapters/services/sandboxSyntaxValidator.service';
+import { GraphContentFormatter } from '../infrastructure/adapters/services/graphContentFormatter.service';
+import { SuggestionLLMValidator } from '../infrastructure/adapters/services/suggestionLLMValidator.service';
+import { CodeReviewPipelineObserver } from '../infrastructure/observers/code-review-pipeline.observer';
+import { AstGraphModule } from '../modules/ast-graph.module';
+import { CodebaseModule } from '../modules/codebase.module';
+import { DocumentationContextModule } from '../modules/documentation-context.module';
+import { PullRequestsModule } from '../modules/pull-requests.module';
+import { PullRequestMessagesModule } from '../modules/pullRequestMessages.module';
+import { CodeReviewJobProcessorService } from '../workflow/code-review-job-processor.service';
+import { ByokConcurrencyGateService } from '../workflow/byok-concurrency-gate.service';
+import { PrReviewDeferralService } from '../workflow/pr-review-deferral.service';
+import { GitHubRateLimitGateService } from '@libs/platform/infrastructure/adapters/services/github/github-rate-limit-gate.service';
+import { RATE_LIMIT_GATE_SERVICE_TOKEN } from '@libs/core/workflow/domain/contracts/rate-limit-gate.service.contract';
+import { ImplementationVerificationProcessor } from '../workflow/implementation-verification.processor';
+import { ValidateSuggestionsStage } from './stages/validate-suggestions.stage';
+import { CodeReviewPipelineStrategy } from './strategy/code-review-pipeline.strategy';
+
+// Sandbox (lease manager)
+import { SandboxModule } from '@libs/sandbox/modules/sandbox.module';
+
+// V3 Agent-First
+import { CreateSandboxStage } from './stages/create-sandbox.stage';
+import { AgentReviewStage } from './stages/agent-review.stage';
+import { BugAgentProvider } from '../infrastructure/agents/providers/bug-agent.provider';
+import { SecurityAgentProvider } from '../infrastructure/agents/providers/security-agent.provider';
+import { PerformanceAgentProvider } from '../infrastructure/agents/providers/performance-agent.provider';
+import { GeneralistAgentProvider } from '../infrastructure/agents/providers/generalist-agent.provider';
+import { FossyRulesAgentProvider } from '../infrastructure/agents/providers/fossy-rules-agent.provider';
+// ReflectionAgentProvider removed — verify/discover was hurting recall
+import { ReviewOrchestratorService } from '../infrastructure/agents/review-orchestrator.service';
+
+@Module({
+    imports: [
+        // Explicit even though FeatureGateModule is @Global(): the pipeline
+        // (AgentReviewStage) injects FeatureGateService, so declaring it here
+        // guarantees availability for any consumer instead of relying on a
+        // bootstrapping app to import the global module — matching how
+        // FeatureGateModule itself explicitly imports its @Global deps.
+        FeatureGateModule,
+        forwardRef(() => CodebaseModule),
+        forwardRef(() => DocumentationContextModule),
+        forwardRef(() => FileReviewModule),
+        forwardRef(() => PullRequestMessagesModule),
+        forwardRef(() => PullRequestsModule),
+        forwardRef(() => ParametersModule),
+        forwardRef(() => OrganizationModule),
+        forwardRef(() => OrganizationParametersModule),
+        forwardRef(() => AgentsModule),
+        forwardRef(() => AIEngineModule),
+        forwardRef(() => PlatformModule),
+        forwardRef(() => FossyFineTuningContextModule),
+        forwardRef(() => AutomationModule),
+        forwardRef(() => GithubModule),
+        forwardRef(() => ForgejoModule),
+        forwardRef(() => PermissionValidationModule),
+        // AgentReviewStage injects FossyRuleSummaryService (long-rule summary
+        // swap for the shard judge). forwardRef: the fossyRules module reaches
+        // back into code-review via CODE_BASE_CONFIG_SERVICE_TOKEN.
+        forwardRef(() => FossyRulesModule),
+        AstGraphModule,
+        forwardRef(() => McpCoreModule),
+        WorkflowCoreModule,
+        SandboxModule,
+        NotificationModule,
+        UserCoreModule,
+        // Owns and exports the single LoadExternalContextStage instance,
+        // including its Trace decision reader dependency.
+        forwardRef(() => PromptsModule),
+        // UpdateCommentsAndGenerateSummaryStage posts the selected Trace pack.
+        TraceContextModule,
+    ],
+    providers: [
+        // Strategy
+        CodeReviewPipelineStrategy,
+
+        // Job Processor
+        CodeReviewJobProcessorService,
+        ByokConcurrencyGateService,
+        PrReviewDeferralService,
+        DistributedLockService,
+        // GitHub rate-limit gate — pre-check before burning slot on a
+        // job whose installation bucket is already exhausted. Same
+        // instance shared via both the token (for processors that
+        // inject by abstraction) and the concrete class (for any
+        // direct consumer).
+        GitHubRateLimitGateService,
+        {
+            provide: RATE_LIMIT_GATE_SERVICE_TOKEN,
+            useExisting: GitHubRateLimitGateService,
+        },
+
+        // Services
+        CloneParamsResolverService,
+
+        // Stages
+        ValidateNewCommitsStage,
+        ValidatePrerequisitesStage,
+        ResolveConfigStage,
+        ValidateConfigStage,
+        FetchChangedFilesStage,
+        InitialCommentStage,
+        BusinessLogicValidationStage,
+        SandboxSyntaxValidator,
+        GraphContentFormatter,
+        SuggestionLLMValidator,
+        CreatePrLevelCommentsStage,
+        CreateFileCommentsStage,
+        AggregateResultsStage,
+        UpdateCommentsAndGenerateSummaryStage,
+        RequestChangesOrApproveStage,
+        ValidateSuggestionsStage,
+
+        // V3 Agent-First stages + providers
+        CreateSandboxStage,
+        AgentReviewStage,
+        BugAgentProvider,
+        SecurityAgentProvider,
+        PerformanceAgentProvider,
+        GeneralistAgentProvider,
+        FossyRulesAgentProvider,
+        // ReflectionAgentProvider removed
+        ReviewOrchestratorService,
+
+        // For GitHub Checks
+        GithubChecksService,
+        ForgejoChecksService,
+        NullChecksAdapter,
+        ChecksAdapterFactory,
+        {
+            provide: PIPELINE_CHECKS_SERVICE_TOKEN,
+            useClass: PipelineChecksService,
+        },
+
+        // Implementation Verification
+        ImplementationVerificationProcessor,
+
+        // Observers
+        CodeReviewPipelineObserver,
+    ],
+    exports: [
+        CodeReviewPipelineStrategy,
+
+        CodeReviewJobProcessorService,
+        CodeReviewPipelineObserver,
+        // Export stages if needed by tests or other modules
+        CreateFileCommentsStage,
+        CreatePrLevelCommentsStage,
+        UpdateCommentsAndGenerateSummaryStage,
+        BusinessLogicValidationStage,
+        ResolveConfigStage,
+        ValidateConfigStage,
+        ValidateNewCommitsStage,
+        ValidatePrerequisitesStage,
+        FetchChangedFilesStage,
+        InitialCommentStage,
+        AggregateResultsStage,
+        PromptsModule,
+        ValidateSuggestionsStage,
+        ImplementationVerificationProcessor,
+        // V3
+        CreateSandboxStage,
+        AgentReviewStage,
+        ReviewOrchestratorService,
+    ],
+})
+export class CodeReviewPipelineModule {}

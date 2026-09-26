@@ -1,0 +1,14 @@
+{
+    "name": "@fossa/webhook-handler",
+    "version": "0.0.1",
+    "description": "Webhook Handler Microservice - Receives webhooks and enqueues them",
+    "main": "dist/main.js",
+    "scripts": {
+        "build": "nest build",
+        "start": "node dist/main.js",
+        "start:dev": "nest start --watch",
+        "start:debug": "nest start --debug --watch"
+    },
+    "dependencies": {},
+    "devDependencies": {}
+}

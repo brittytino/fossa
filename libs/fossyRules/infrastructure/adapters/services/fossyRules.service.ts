@@ -1,0 +1,2462 @@
+import {
+    forwardRef,
+    Inject,
+    Injectable,
+    NotFoundException,
+    Optional,
+} from '@nestjs/common';
+import { FossyRuleSummaryService } from '@libs/fossyRules/infrastructure/adapters/services/fossy-rule-summary.service';
+import { LLM } from '@libs/llm/llm';
+import { v4 } from 'uuid';
+import bucketsData from '../data/buckets.json';
+import libraryFossyRules from '../data/library-fossy-rules.json';
+
+import { createLogger } from '@libs/core/log/logger';
+import { CentralizedConfigPrService } from '@libs/centralized-config/infrastructure/adapters/services/centralized-config-pr.service';
+import { ModuleRef } from '@nestjs/core';
+import {
+    buildFossyRuleCentralizedFilePath,
+    buildFossyRuleCentralizedMutationRequest,
+} from '@libs/centralized-config/utils/fossy-rules-centralized-pr.builder';
+import {
+    CODE_BASE_CONFIG_SERVICE_TOKEN,
+    ICodeBaseConfigService,
+} from '@libs/code-review/domain/contracts/CodeBaseConfigService.contract';
+import {
+    fossyMemoryResolutionSchema,
+    prompt_fossyMemoryResolution_system,
+    prompt_fossyMemoryResolution_user,
+} from '@libs/common/utils/prompts/fossyMemoryResolution';
+import { fossyRulesRecommendationSchema } from '@libs/common/utils/prompts/fossyRulesRecommendation';
+import { ProgrammingLanguage } from '@libs/core/domain/enums';
+import {
+    ActionType,
+    UserInfo,
+} from '@libs/core/infrastructure/config/types/general/codeReviewSettingsLog.type';
+import {
+    BucketInfo,
+    FossyRuleFilters,
+    LibraryFossyRule,
+} from '@libs/core/infrastructure/config/types/general/fossyRules.type';
+import { OrganizationAndTeamData } from '@libs/core/infrastructure/config/types/general/organizationAndTeamData';
+import { ObservabilityService } from '@libs/core/log/observability.service';
+import { LLM_TASK } from '@libs/llm/byok-config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import {
+    CreateFossyRuleDto,
+    FossyRuleSeverity,
+} from '@libs/fossyRules/dtos/create-fossy-rule.dto';
+import { PermissionValidationService } from '@libs/shared/infrastructure/permissions';
+import {
+    IFossyRulesRepository,
+    FOSSY_RULES_REPOSITORY_TOKEN,
+} from '@libs/fossyRules/domain/contracts/fossyRules.repository.contract';
+import {
+    CreateOrUpdateMemoryResult,
+    IFossyRulesService,
+} from '@libs/fossyRules/domain/contracts/fossyRules.service.contract';
+import {
+    IRuleLikeService,
+    RULE_LIKE_SERVICE_TOKEN,
+} from '@libs/fossyRules/domain/contracts/ruleLike.service.contract';
+import { FossyRulesEntity } from '@libs/fossyRules/domain/entities/fossyRules.entity';
+import {
+    FindMemoriesFilters,
+    FindMemoriesResult,
+    IFossyRule,
+    IFossyRuleContextNeed,
+    IFossyRuleFileScope,
+    IFossyRuleCompileAttempt,
+    IFossyRuleDetector,
+    IFossyRuleMemory,
+    IFossyRules,
+    FossyRuleCentralizedStatus,
+    FossyRuleRequestType,
+    FossyRulesScope,
+    FossyRulesOrigin,
+    FossyRulesStatus,
+    FossyRulesType,
+} from '@libs/fossyRules/domain/interfaces/fossyRules.interface';
+import { MCPManagerService } from '@libs/mcp-server/services/mcp-manager.service';
+import {
+    IPullRequestsRepository,
+    PULL_REQUESTS_REPOSITORY_TOKEN,
+} from '@libs/platformData/domain/pullRequests/contracts/pullRequests.repository';
+import { FossyRulesValidationService } from './fossy-rules-validation.service';
+import { buildFossyRuleAppLink } from '../utils/build-rule-link';
+import { isGeneratedFossyRuleOrigin } from '@libs/common/utils/fossy-rules/resolve-origin';
+import { requiresKnowledgeApproval } from '@libs/common/utils/fossy-rules/knowledge-approval';
+import {
+    IParametersService,
+    PARAMETERS_SERVICE_TOKEN,
+} from '@libs/organization/domain/parameters/contracts/parameters.service.contract';
+import { ParametersKey } from '@libs/core/domain/enums';
+import {
+    CodeReviewParameter,
+    ICodeRepository,
+    RepositoryCodeReviewConfig,
+} from '@libs/core/infrastructure/config/types/general/codeReviewConfig.type';
+import { IntegrationConfigKey } from '@libs/core/domain/enums/Integration-config-key.enum';
+import {
+    IIntegrationConfigService,
+    INTEGRATION_CONFIG_SERVICE_TOKEN,
+} from '@libs/integrations/domain/integrationConfigs/contracts/integration-config.service.contracts';
+
+@Injectable()
+export class FossyRulesService implements IFossyRulesService {
+    private readonly logger = createLogger(FossyRulesService.name);
+
+    constructor(
+        @Inject(FOSSY_RULES_REPOSITORY_TOKEN)
+        private readonly fossyRulesRepository: IFossyRulesRepository,
+
+        private readonly eventEmitter: EventEmitter2,
+
+        @Inject(RULE_LIKE_SERVICE_TOKEN)
+        private readonly ruleLikeService: IRuleLikeService,
+
+        @Inject(PULL_REQUESTS_REPOSITORY_TOKEN)
+        private readonly pullRequestsRepository: IPullRequestsRepository,
+
+        private readonly fossyRulesValidationService: FossyRulesValidationService,
+
+        private readonly mcpManagerService: MCPManagerService,
+
+        private readonly observabilityService: ObservabilityService,
+
+        private readonly permissionValidationService: PermissionValidationService,
+
+        // ModuleRef em vez de injetar CentralizedConfigPrService direto.
+        // FossyRulesService ↔ CentralizedConfigPrService formam um ciclo
+        // profundo, e CCP é request-scoped (transitivamente, via
+        // codeManagementService). forwardRef nessa combinação produzia
+        // um proxy vazio em runtime. moduleRef.resolve() resolve o
+        // provider lazy, no contexto correto, sem precisar refatorar o
+        // ciclo.
+        private readonly moduleRef: ModuleRef,
+
+        @Inject(forwardRef(() => CODE_BASE_CONFIG_SERVICE_TOKEN))
+        private readonly codeBaseConfigService: ICodeBaseConfigService,
+
+        // Optional so existing manual instantiations/specs keep working; when
+        // absent the summary hook is simply skipped (lazy backfill in the
+        // review path covers it).
+        @Optional()
+        private readonly fossyRuleSummaryService?: FossyRuleSummaryService,
+    ) {}
+
+    /**
+     * Fire-and-forget summary generation for a just-written LONG rule.
+     * Detached from the request (setImmediate + captured plain values — no
+     * request-scoped references, see the finish-onboarding 504 postmortem) so
+     * writes never wait on an LLM. Short rules never reach generation;
+     * ensureAtoms also no-ops when a fresh decomposition already exists.
+     */
+    private scheduleSummaryGeneration(
+        organizationAndTeamData: OrganizationAndTeamData,
+        rule: Partial<IFossyRule>,
+    ): void {
+        if (!this.fossyRuleSummaryService?.isLong(rule.rule)) {
+            return;
+        }
+        const summaryService = this.fossyRuleSummaryService;
+        const orgData: OrganizationAndTeamData = {
+            organizationId: organizationAndTeamData.organizationId,
+            teamId: organizationAndTeamData.teamId,
+        };
+        const snapshot: Partial<IFossyRule> = { ...rule };
+        setImmediate(() => {
+            summaryService.ensureAtoms([snapshot], orgData).catch((error) =>
+                this.logger.warn({
+                    message:
+                        '[fossy-rule-summary] background generation failed after rule write',
+                    context: FossyRulesService.name,
+                    metadata: {
+                        organizationId: orgData.organizationId,
+                        ruleUuid: rule.uuid,
+                        error:
+                            error instanceof Error
+                                ? error.message
+                                : String(error),
+                    },
+                }),
+            );
+        });
+    }
+
+    // CCP é request-scoped (depende transitivamente de algo
+    // request-scoped, provavelmente codeManagementService com token
+    // multi-tenant). ModuleRef.get() não funciona com scoped providers
+    // — precisa ser ModuleRef.resolve(), que é async e cria uma
+    // instância no contexto atual de injeção.
+    private async resolveCentralizedConfigPrService(): Promise<CentralizedConfigPrService> {
+        return this.moduleRef.resolve(CentralizedConfigPrService, undefined, {
+            strict: false,
+        });
+    }
+
+    countRules(
+        organizationId: string,
+        status?: FossyRulesStatus,
+    ): Promise<number> {
+        throw new Error('Method not implemented.');
+    }
+
+    getNativeCollection() {
+        throw new Error('Method not implemented.');
+    }
+
+    async create(
+        fossyRules: Omit<IFossyRules, 'uuid'>,
+    ): Promise<FossyRulesEntity | null> {
+        return this.fossyRulesRepository.create(fossyRules);
+    }
+
+    async findById(uuid: string): Promise<IFossyRule | null> {
+        return this.fossyRulesRepository.findById(uuid);
+    }
+
+    async findOne(
+        filter?: Partial<IFossyRules>,
+    ): Promise<FossyRulesEntity | null> {
+        return this.fossyRulesRepository.findOne(filter);
+    }
+
+    async find(filter?: Partial<IFossyRules>): Promise<FossyRulesEntity[]> {
+        const entities = await this.fossyRulesRepository.find(filter);
+
+        if (!entities?.length) return entities;
+
+        const toObject = (e: any) =>
+            typeof e?.toObject === 'function' ? e.toObject() : e;
+
+        const staleOrgIds = new Set<string>();
+        entities.forEach((e) => {
+            const obj = toObject(e);
+            if (
+                obj?.rules?.some(
+                    (r: any) =>
+                        r.status === FossyRulesStatus.PAUSED && r.lockedByPlan,
+                ) &&
+                obj?.organizationId
+            ) {
+                staleOrgIds.add(obj.organizationId);
+            }
+        });
+
+        const orgIdArray = [...staleOrgIds];
+        const syncResults = await Promise.allSettled(
+            orgIdArray.map((orgId) =>
+                this.syncRulesWithPlanLimit({ organizationId: orgId }),
+            ),
+        );
+
+        syncResults.forEach((result, index) => {
+            if (result.status === 'rejected') {
+                const orgId = orgIdArray[index];
+                this.logger.error({
+                    message: 'Failed self-healing stale rules in find()',
+                    context: FossyRulesService.name,
+                    error: result.reason,
+                    metadata: { organizationId: orgId },
+                });
+            }
+        });
+        const normalized = (entitiesResult: FossyRulesEntity[]) =>
+            entitiesResult?.map((entity) => {
+                const normalized = toObject(entity);
+                normalized.rules = normalized.rules.map((rule) => ({
+                    ...rule,
+                    severity: rule.severity?.toLowerCase(),
+                }));
+                return FossyRulesEntity.create(normalized);
+            });
+
+        if (staleOrgIds.size > 0) {
+            return normalized(await this.fossyRulesRepository.find(filter));
+        }
+
+        return normalized(entities);
+    }
+
+    async findByOrganizationId(
+        organizationId: string,
+    ): Promise<FossyRulesEntity | null> {
+        return this.fossyRulesRepository.findByOrganizationId(organizationId);
+    }
+
+    /**
+     * Synchronizes an organization's stored Fossy Rules in MongoDB with its
+     * current plan resource limits (#1626).
+     *
+     * - On Paid plans (not limited): clears `lockedByPlan` and flips `PAUSED` → `ACTIVE`
+     *   for any rules that were previously locked by plan limits.
+     * - On Free plans (limited): enforces the 10-rule cap on active rules, stamping any
+     *   overflow rules as `PAUSED` with `lockedByPlan: true`.
+     */
+    async syncRulesWithPlanLimit(
+        organizationAndTeamData: OrganizationAndTeamData,
+        opts: { entity?: FossyRulesEntity | null; limited?: boolean } = {},
+    ): Promise<FossyRulesEntity | null> {
+        const organizationId = organizationAndTeamData.organizationId;
+        if (!organizationId) return null;
+
+        // The review pipeline already loaded the rules; it passes the entity in
+        // so this fail-safe doesn't repeat the round-trip.
+        const entity =
+            opts.entity ??
+            (await this.fossyRulesRepository.findByOrganizationId(
+                organizationId,
+            ));
+        const existingRules = entity?.toObject()?.rules || [];
+
+        if (!existingRules?.length) return entity;
+
+        let isLimited: boolean;
+        if (typeof opts.limited === 'boolean') {
+            // codeBaseConfig already resolved the plan gate for the review —
+            // reuse it instead of a second license lookup.
+            isLimited = opts.limited;
+        } else {
+            try {
+                isLimited =
+                    await this.permissionValidationService.shouldLimitResources(
+                        organizationAndTeamData,
+                        FossyRulesService.name,
+                    );
+            } catch (error) {
+                this.logger.error({
+                    message: 'Error checking resource limits for rules sync',
+                    context: FossyRulesService.name,
+                    error,
+                    metadata: { organizationAndTeamData },
+                });
+                return entity;
+            }
+        }
+
+        const changedRules: Array<{ ruleId: string; patch: Partial<IFossyRule> }> = [];
+
+        if (!isLimited) {
+            // Paid plan: unpause any rule that was auto-locked by a plan limit
+            for (const r of existingRules) {
+                if (r.uuid && r.status === FossyRulesStatus.PAUSED && r.lockedByPlan) {
+                    changedRules.push({
+                        ruleId: r.uuid,
+                        patch: {
+                            status: FossyRulesStatus.ACTIVE,
+                            lockedByPlan: false,
+                            updatedAt: new Date(),
+                        },
+                    });
+                }
+            }
+        } else {
+            // Free plan: enforce MAX_FOSSY_RULES (10) active ceiling
+            const MAX = this.fossyRulesValidationService.MAX_FOSSY_RULES;
+            let activeCount = 0;
+
+            for (const r of existingRules) {
+                if (r.status === FossyRulesStatus.ACTIVE) {
+                    activeCount++;
+                    if (activeCount > MAX && r.uuid) {
+                        changedRules.push({
+                            ruleId: r.uuid,
+                            patch: {
+                                status: FossyRulesStatus.PAUSED,
+                                lockedByPlan: true,
+                                updatedAt: new Date(),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
+        if (!changedRules.length) return entity;
+
+        // Targeted per-rule updates in parallel: prevents whole-array overwrite race conditions (#1626)
+        const updateResults = await Promise.allSettled(
+            changedRules.map(({ ruleId, patch }) =>
+                this.fossyRulesRepository.updateRule(
+                    entity.uuid,
+                    ruleId,
+                    patch,
+                ),
+            ),
+        );
+
+        updateResults.forEach((res, i) => {
+            if (res.status === 'rejected') {
+                this.logger.error({
+                    message: 'Failed per-rule update in syncRulesWithPlanLimit',
+                    context: FossyRulesService.name,
+                    error: res.reason,
+                    metadata: { organizationId, ruleId: changedRules[i].ruleId },
+                });
+            }
+        });
+
+        this.logger.log({
+            message: 'Synchronized Fossy Rules with current plan limits in MongoDB',
+            context: FossyRulesService.name,
+            metadata: {
+                organizationId,
+                isLimited,
+                updatedRuleCount: changedRules.length,
+            },
+        });
+
+        return this.fossyRulesRepository.findByOrganizationId(organizationId);
+    }
+
+    async findOrganizationIdsWithRules(): Promise<string[]> {
+        return this.fossyRulesRepository.findOrganizationIdsWithRules();
+    }
+
+    /**
+     * Obtém informações sobre limites de Fossy Rules para uma organização
+     * Usado pelo frontend para controlar UI (desabilitar botões, mostrar avisos, etc)
+     */
+    async getRulesLimitStatus(
+        organizationAndTeamData: OrganizationAndTeamData,
+    ): Promise<{
+        total: number;
+    }> {
+        try {
+            // Count server-side via aggregation instead of loading the
+            // entire rules array and filtering in JS. Orgs with 100s–
+            // 1000s of rules saw the old path transfer 100KB+ of
+            // embedded docs per request just to compute a single
+            // number.
+            const total = await this.fossyRulesRepository.countRules(
+                organizationAndTeamData.organizationId,
+                FossyRulesStatus.ACTIVE,
+            );
+
+            return { total };
+        } catch (error) {
+            this.logger.error({
+                message: 'Error getting rules limit status',
+                error: error,
+                context: FossyRulesService.name,
+                metadata: { organizationAndTeamData },
+            });
+            throw error;
+        }
+    }
+
+    /**
+     * Per-(repo, directory) rule counts for an organization, computed in a
+     * single aggregation. Counts ACTIVE + PAUSED — the pool the user sees
+     * in the list (mirrors `useFossyRulesCount` on the web). Drives the per
+     * repository/directory count badges without fetching each repo's full
+     * rules array (and running enrichment) once per card.
+     */
+    async countRulesByRepository(organizationId: string): Promise<
+        Array<{
+            repositoryId: string;
+            directoryId: string | null;
+            count: number;
+        }>
+    > {
+        return this.fossyRulesRepository.countRulesByRepository(organizationId, [
+            FossyRulesStatus.ACTIVE,
+            FossyRulesStatus.PAUSED,
+        ]);
+    }
+
+    /**
+     * Busca rules específicas por organização, repositório e diretório
+     * Versão simplificada que filtra in-memory
+     */
+    async findRulesByDirectory(
+        organizationId: string,
+        repositoryId: string,
+        directoryId: string,
+        type?: FossyRulesType,
+    ): Promise<Partial<IFossyRule>[]> {
+        const entity = await this.findByOrganizationId(organizationId);
+
+        if (!entity?.toObject()?.rules) {
+            return [];
+        }
+
+        return entity
+            .toObject()
+            .rules.filter(
+                (rule) =>
+                    (type ? rule.type === type : true) &&
+                    rule.repositoryId === repositoryId &&
+                    rule.directoryId === directoryId &&
+                    rule.status === FossyRulesStatus.ACTIVE,
+            );
+    }
+
+    async update(
+        uuid: string,
+        updateData: Partial<IFossyRules>,
+    ): Promise<FossyRulesEntity | null> {
+        return this.fossyRulesRepository.update(uuid, updateData);
+    }
+
+    async delete(uuid: string): Promise<boolean> {
+        return this.fossyRulesRepository.delete(uuid);
+    }
+
+    async addRule(
+        uuid: string,
+        newRule: Partial<IFossyRule>,
+    ): Promise<FossyRulesEntity | null> {
+        return this.fossyRulesRepository.addRule(uuid, newRule);
+    }
+
+    async updateRule(
+        uuid: string,
+        ruleId: string,
+        updateData: Partial<IFossyRule>,
+    ): Promise<FossyRulesEntity | null> {
+        return this.fossyRulesRepository.updateRule(uuid, ruleId, updateData);
+    }
+
+    async createOrUpdate(
+        organizationAndTeamData: OrganizationAndTeamData,
+        fossyRule: CreateFossyRuleDto,
+        userInfo: UserInfo,
+    ): Promise<Partial<IFossyRule> | IFossyRule | null> {
+        const existing = await this.findByOrganizationId(
+            organizationAndTeamData.organizationId,
+        );
+
+        // The new rule only consumes plan quota if it lands ACTIVE — quota
+        // counts ACTIVE only (see the gate in the existing-doc branch and
+        // getRulesLimitStatus). A rule created paused/pending doesn't count.
+        const newRuleCountsTowardQuota =
+            (fossyRule?.status ?? FossyRulesStatus.ACTIVE) ===
+            FossyRulesStatus.ACTIVE;
+
+        // If no rules exist for the organization
+        if (!existing) {
+            if (fossyRule.uuid) {
+                throw new NotFoundException('Rule not found');
+            }
+
+            const { status: resolvedStatus, lockedByPlan } =
+                await this.resolveStatusWithinPlanLimit(
+                    organizationAndTeamData,
+                    fossyRule?.status ?? FossyRulesStatus.ACTIVE,
+                    newRuleCountsTowardQuota ? 1 : 0,
+                );
+
+            const newRule: IFossyRule = {
+                uuid: v4(),
+                type: fossyRule?.type ?? FossyRulesType.STANDARD,
+                title: fossyRule?.title,
+                rule: fossyRule?.rule,
+                path: fossyRule?.path,
+                severity: fossyRule?.severity?.toLowerCase(),
+                status: resolvedStatus,
+                lockedByPlan,
+                sourcePath: fossyRule?.sourcePath,
+                centralizedConfig: fossyRule?.centralizedConfig,
+                sourceAnchor: fossyRule?.sourceAnchor,
+                repositoryId: fossyRule?.repositoryId,
+                sourceRepositoryId: fossyRule?.sourceRepositoryId,
+                lastContentHash: fossyRule?.lastContentHash,
+                directoryId: fossyRule?.directoryId,
+                examples: fossyRule?.examples,
+                // Issue #1826. `createOrUpdate` maps every field of a NEW rule
+                // explicitly, so a field missing from either literal is
+                // silently dropped at birth and again on the next edit that
+                // rebuilds the rule. The DTO does not declare `contextNeed`
+                // (backend-first: no form field), but the internal write paths
+                // — MCP, library import, the sync flows — hand this method
+                // plain rule objects that can carry an author's value.
+                contextNeed: (fossyRule as Partial<IFossyRule>)?.contextNeed,
+                // Same reason, same failure mode: dropping the inferred
+                // language scope here would un-narrow the rule at the next
+                // edit and nothing anywhere would say so.
+                fileScope: (fossyRule as Partial<IFossyRule>)?.fileScope,
+                compileAttempt: (fossyRule as Partial<IFossyRule>)
+                    ?.compileAttempt,
+                origin: fossyRule?.origin ?? FossyRulesOrigin.MANUAL,
+                scope: fossyRule?.scope ?? FossyRulesScope.FILE,
+                inheritance: {
+                    inheritable: fossyRule?.inheritance?.inheritable ?? true,
+                    exclude: fossyRule?.inheritance?.exclude ?? [],
+                    include: fossyRule?.inheritance?.include ?? [],
+                },
+                requestType: fossyRule?.requestType,
+                targetRuleUuid: fossyRule?.targetRuleUuid,
+                resolvedAt: fossyRule?.resolvedAt,
+                resolvedBy: fossyRule?.resolvedBy,
+                pinnedSync: fossyRule?.pinnedSync,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+            };
+
+            const newFossyRules = await this.create({
+                organizationId: organizationAndTeamData.organizationId,
+                rules: [newRule],
+            });
+
+            if (!newFossyRules) {
+                throw new Error(
+                    'Could not create new Fossy rules for organization',
+                );
+            }
+
+            this.eventEmitter.emit(AuditLogEvents.FOSSY_RULES, {
+                organizationAndTeamData,
+                userInfo,
+                actionType:
+                    newRule.origin === FossyRulesOrigin.LIBRARY
+                        ? ActionType.CLONE
+                        : ActionType.CREATE,
+                repository: { id: newRule.repositoryId },
+                oldRule: undefined,
+                newRule: newRule,
+                ruleTitle: newRule.title,
+            });
+
+            await this.ensureRepositoryCodeReviewConfig(
+                organizationAndTeamData,
+                newRule,
+            );
+
+            this.scheduleSummaryGeneration(organizationAndTeamData, newRule);
+
+            return newFossyRules.rules[0];
+        }
+
+        // If there is no UUID, it is a new rule
+        if (!fossyRule.uuid) {
+            // Count ACTIVE only, matching the `/limits` endpoint
+            // (getRulesLimitStatus → countRules(ACTIVE)). Counting
+            // `!== DELETED` also counts PAUSED/PENDING rules the UI never
+            // shows against the quota, so the UI says "add away" while this
+            // gate rejects. Paused/pending rules aren't enforced and don't
+            // consume plan quota. The +1 is conditional: a rule created
+            // already paused/pending doesn't add to the active count.
+            const activeRulesCount = (existing.rules ?? []).filter(
+                (r) => r.status === FossyRulesStatus.ACTIVE,
+            ).length;
+            const { status: resolvedStatus, lockedByPlan } =
+                await this.resolveStatusWithinPlanLimit(
+                    organizationAndTeamData,
+                    fossyRule.status ?? FossyRulesStatus.ACTIVE,
+                    activeRulesCount + (newRuleCountsTowardQuota ? 1 : 0),
+                );
+
+            const newRule: IFossyRule = {
+                uuid: v4(),
+                type: fossyRule.type,
+                title: fossyRule.title,
+                rule: fossyRule.rule,
+                path: fossyRule.path,
+                sourcePath: fossyRule.sourcePath,
+                centralizedConfig: fossyRule.centralizedConfig,
+                sourceAnchor: fossyRule.sourceAnchor,
+                severity: fossyRule.severity?.toLowerCase(),
+                status: resolvedStatus,
+                lockedByPlan,
+                repositoryId: fossyRule?.repositoryId,
+                sourceRepositoryId: fossyRule?.sourceRepositoryId,
+                lastContentHash: fossyRule?.lastContentHash,
+                directoryId: fossyRule?.directoryId,
+                examples: fossyRule?.examples,
+                // Issue #1826. `createOrUpdate` maps every field of a NEW rule
+                // explicitly, so a field missing from either literal is
+                // silently dropped at birth and again on the next edit that
+                // rebuilds the rule. The DTO does not declare `contextNeed`
+                // (backend-first: no form field), but the internal write paths
+                // — MCP, library import, the sync flows — hand this method
+                // plain rule objects that can carry an author's value.
+                contextNeed: (fossyRule as Partial<IFossyRule>)?.contextNeed,
+                // Same reason, same failure mode: dropping the inferred
+                // language scope here would un-narrow the rule at the next
+                // edit and nothing anywhere would say so.
+                fileScope: (fossyRule as Partial<IFossyRule>)?.fileScope,
+                compileAttempt: (fossyRule as Partial<IFossyRule>)
+                    ?.compileAttempt,
+                origin: fossyRule?.origin ?? FossyRulesOrigin.MANUAL,
+                scope: fossyRule?.scope ?? FossyRulesScope.FILE,
+                inheritance: {
+                    inheritable: fossyRule?.inheritance?.inheritable ?? true,
+                    exclude: fossyRule?.inheritance?.exclude ?? [],
+                    include: fossyRule?.inheritance?.include ?? [],
+                },
+                requestType: fossyRule?.requestType,
+                targetRuleUuid: fossyRule?.targetRuleUuid,
+                resolvedAt: fossyRule?.resolvedAt,
+                resolvedBy: fossyRule?.resolvedBy,
+                pinnedSync: fossyRule?.pinnedSync,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+            };
+
+            const updatedFossyRules = await this.addRule(existing.uuid, newRule);
+
+            if (!updatedFossyRules) {
+                throw new Error('Could not add new rule');
+            }
+
+            this.eventEmitter.emit(AuditLogEvents.FOSSY_RULES, {
+                organizationAndTeamData,
+                userInfo,
+                actionType:
+                    newRule.origin === FossyRulesOrigin.LIBRARY
+                        ? ActionType.CLONE
+                        : ActionType.CREATE,
+                repository: { id: newRule.repositoryId },
+                directory: { id: newRule.directoryId },
+                oldRule: undefined,
+                newRule: newRule,
+                ruleTitle: newRule.title,
+            });
+
+            await this.ensureRepositoryCodeReviewConfig(
+                organizationAndTeamData,
+                newRule,
+            );
+
+            this.scheduleSummaryGeneration(organizationAndTeamData, newRule);
+
+            return updatedFossyRules.rules.find(
+                (rule) => rule.uuid === newRule.uuid,
+            );
+        }
+
+        // If there is a UUID, it is an update
+        const existingRule = existing?.rules?.find(
+            (rule) => rule.uuid === fossyRule.uuid,
+        );
+
+        if (!existingRule) {
+            throw new NotFoundException('Rule not found');
+        }
+
+        // When unpausing (changing from non-ACTIVE to ACTIVE), re-check the
+        // free-plan quota so the user can't bypass the 10-rule limit by
+        // pausing and creating new rules — if the org is still over quota,
+        // the rule stays PAUSED (lockedByPlan) instead of reactivating.
+        let statusOverride: Partial<
+            Pick<IFossyRule, 'status' | 'lockedByPlan'>
+        > = {};
+
+        if (
+            fossyRule.status === FossyRulesStatus.ACTIVE &&
+            existingRule.status !== FossyRulesStatus.ACTIVE
+        ) {
+            const activeRulesCount = (existing.rules ?? []).filter(
+                (r) => r.status === FossyRulesStatus.ACTIVE,
+            ).length;
+            statusOverride = await this.resolveStatusWithinPlanLimit(
+                organizationAndTeamData,
+                FossyRulesStatus.ACTIVE,
+                activeRulesCount + 1,
+            );
+        } else if (
+            fossyRule.status !== undefined &&
+            fossyRule.status !== FossyRulesStatus.ACTIVE
+        ) {
+            // Any explicit non-ACTIVE transition (manual pause, reject,
+            // delete) is user-initiated, not a plan lock.
+            statusOverride = { status: fossyRule.status, lockedByPlan: false };
+        }
+
+        // Normalize severity on the way in (create/addRule already do this);
+        // otherwise an update could persist a mixed-case severity that only
+        // looks consistent because find() lower-cases on read.
+        const mergedSeverity = (
+            fossyRule.severity ?? existingRule.severity
+        )?.toLowerCase();
+
+        const updatedRule = {
+            ...existingRule,
+            ...fossyRule,
+            ...statusOverride,
+            ...(mergedSeverity ? { severity: mergedSeverity } : {}),
+            updatedAt: new Date(),
+        };
+
+        // The spread above carries the OLD summary. If the rule text changed
+        // it is stale (would also fail the sourceHash guard at review time):
+        // drop it — this also covers a long rule edited down to a short one,
+        // which must not keep a summary of its former long text. A long new
+        // text gets a fresh summary scheduled below.
+        const ruleTextChanged =
+            fossyRule.rule !== undefined && fossyRule.rule !== existingRule.rule;
+        // Examples gate the atom detectors (atoms sourceHash covers them), so
+        // an examples-only edit invalidates the DECOMPOSITION — but not the
+        // summary, whose hash covers the rule text alone and stays valid as
+        // the fallback while fresh atoms are regenerated.
+        const examplesChanged =
+            fossyRule.examples !== undefined &&
+            JSON.stringify(fossyRule.examples) !==
+                JSON.stringify(existingRule.examples);
+        if (ruleTextChanged) {
+            delete (updatedRule as Partial<IFossyRule>).summary;
+            delete (updatedRule as Partial<IFossyRule>).atoms;
+        } else if (examplesChanged) {
+            delete (updatedRule as Partial<IFossyRule>).atoms;
+        }
+
+        const updatedFossyRules = await this.updateRule(
+            existing.uuid,
+            fossyRule.uuid,
+            updatedRule,
+        );
+
+        if (updatedFossyRules && (ruleTextChanged || examplesChanged)) {
+            this.scheduleSummaryGeneration(
+                organizationAndTeamData,
+                updatedRule,
+            );
+        }
+
+        this.eventEmitter.emit(AuditLogEvents.FOSSY_RULES, {
+            organizationAndTeamData,
+            userInfo: userInfo || {
+                userId: 'fossy-system',
+                userEmail: 'fossy@fossa.local',
+            },
+            actionType: ActionType.EDIT,
+            repository: { id: updatedRule.repositoryId },
+            directory: { id: updatedRule.directoryId },
+            oldRule: existingRule,
+            newRule: updatedRule,
+            ruleTitle: updatedRule.title,
+        });
+
+        if (!updatedFossyRules) {
+            throw new Error('Could not update rule');
+        }
+
+        return updatedFossyRules.rules.find(
+            (rule) => rule.uuid === fossyRule.uuid,
+        );
+    }
+
+    private async ensureRepositoryCodeReviewConfig(
+        organizationAndTeamData: OrganizationAndTeamData,
+        rule: Partial<IFossyRule>,
+    ): Promise<void> {
+        if (
+            rule.origin === FossyRulesOrigin.MANUAL ||
+            rule.origin === FossyRulesOrigin.ONBOARDING_REPO_ANALYSIS ||
+            !rule.repositoryId ||
+            rule.repositoryId === 'global'
+        ) {
+            return;
+        }
+
+        let parametersService: IParametersService;
+        let integrationConfigService: IIntegrationConfigService;
+        try {
+            parametersService = this.moduleRef.get(PARAMETERS_SERVICE_TOKEN, {
+                strict: false,
+            });
+            integrationConfigService = this.moduleRef.get(
+                INTEGRATION_CONFIG_SERVICE_TOKEN,
+                { strict: false },
+            );
+        } catch {
+            return;
+        }
+
+        try {
+            const codeReviewConfig = await parametersService.findByKey(
+                ParametersKey.CODE_REVIEW_CONFIG,
+                organizationAndTeamData,
+            );
+
+            let repositoryName = rule.repositoryId;
+            try {
+                const repos =
+                    await integrationConfigService.findIntegrationConfigFormatted<
+                        ICodeRepository[]
+                    >(
+                        IntegrationConfigKey.REPOSITORIES,
+                        organizationAndTeamData,
+                    );
+
+                const matched = repos?.find((r) => r.id === rule.repositoryId);
+                if (matched?.name) {
+                    repositoryName = matched.name;
+                }
+            } catch {
+                // fallback: use repositoryId as name
+            }
+
+            const newRepo: RepositoryCodeReviewConfig = {
+                id: rule.repositoryId,
+                name: repositoryName,
+                isSelected: true,
+                configs: {},
+            };
+
+            if (!codeReviewConfig?.configValue) {
+                const configValue: CodeReviewParameter = {
+                    id: 'global',
+                    name: 'Global',
+                    isSelected: true,
+                    configs: {},
+                    repositories: [newRepo],
+                };
+
+                await parametersService.createOrUpdateConfig(
+                    ParametersKey.CODE_REVIEW_CONFIG,
+                    configValue,
+                    organizationAndTeamData,
+                );
+
+                return;
+            }
+
+            const configValue =
+                codeReviewConfig.configValue as CodeReviewParameter;
+            const repositories = configValue.repositories || [];
+
+            if (repositories.some((r) => r.id === rule.repositoryId)) {
+                return;
+            }
+
+            const updatedConfigValue: CodeReviewParameter = {
+                ...configValue,
+                repositories: [...repositories, newRepo],
+            };
+
+            await parametersService.createOrUpdateConfig(
+                ParametersKey.CODE_REVIEW_CONFIG,
+                updatedConfigValue,
+                organizationAndTeamData,
+            );
+        } catch (error) {
+            this.logger.error({
+                message:
+                    'Failed to auto-create repository config for auto-generated rule',
+                context: FossyRulesService.name,
+                error,
+                metadata: {
+                    repositoryId: rule.repositoryId,
+                    ruleId: rule.uuid,
+                    ruleOrigin: rule.origin,
+                    organizationAndTeamData,
+                },
+            });
+        }
+    }
+
+    async updateRuleReferences(
+        organizationId: string,
+        ruleId: string,
+        references: {
+            contextReferenceId?: string;
+            // Todos os outros campos de referência foram movidos para Context OS
+        },
+    ): Promise<IFossyRule | null> {
+        this.logger.log({
+            message: 'FossyRulesService.updateRuleReferences called',
+            context: FossyRulesService.name,
+            metadata: {
+                organizationId,
+                ruleId,
+                contextReferenceId: references.contextReferenceId,
+                strategy: 'context-os-only', // Todos os campos de referência ficam no Context OS
+            },
+        });
+
+        const existing = await this.findByOrganizationId(organizationId);
+
+        if (!existing) {
+            throw new NotFoundException(
+                'Fossy rules not found for organization',
+            );
+        }
+
+        const existingRule = existing.rules?.find(
+            (rule) => rule.uuid === ruleId,
+        );
+
+        if (!existingRule) {
+            throw new NotFoundException('Rule not found');
+        }
+
+        const updatedRule = {
+            ...existingRule,
+            contextReferenceId: references.contextReferenceId,
+            // Todos os outros campos de referência foram movidos para Context OS
+            updatedAt: new Date(),
+        } as IFossyRule;
+
+        const updatedFossyRules = await this.updateRule(
+            existing.uuid,
+            ruleId,
+            updatedRule,
+        );
+
+        if (!updatedFossyRules) {
+            this.logger.error({
+                message: 'Could not update rule references',
+                error: new Error('Could not update rule references'),
+                context: FossyRulesService.name,
+                metadata: {
+                    organizationId,
+                    ruleId,
+                    references,
+                },
+            });
+            throw new Error('Could not update rule references');
+        }
+
+        const updatedRuleResult = updatedFossyRules.rules.find(
+            (rule) => rule.uuid === ruleId,
+        );
+
+        return updatedRuleResult ? (updatedRuleResult as IFossyRule) : null;
+    }
+
+    async updateRuleDetector(
+        organizationId: string,
+        ruleId: string,
+        detector: IFossyRuleDetector | null,
+    ): Promise<IFossyRule | null> {
+        const existing = await this.findByOrganizationId(organizationId);
+        if (!existing) {
+            throw new NotFoundException(
+                'Fossy rules not found for organization',
+            );
+        }
+
+        const existingRule = existing.rules?.find((r) => r.uuid === ruleId);
+        if (!existingRule) {
+            throw new NotFoundException('Rule not found');
+        }
+
+        const updatedRule = {
+            ...existingRule,
+            // Pass `null` through as-is: updateRule skips only `undefined`, so
+            // `detector: null` writes `$set rules.$.detector = null` and clears
+            // a stale detector. `?? undefined` here would silently no-op the
+            // clear and leave the old regex firing forever.
+            detector: detector,
+            updatedAt: new Date(),
+        } as IFossyRule;
+
+        const updatedFossyRules = await this.updateRule(
+            existing.uuid,
+            ruleId,
+            updatedRule,
+        );
+
+        if (!updatedFossyRules) {
+            this.logger.error({
+                message: 'Could not update rule detector',
+                error: new Error('Could not update rule detector'),
+                context: FossyRulesService.name,
+                metadata: { organizationId, ruleId },
+            });
+            throw new Error('Could not update rule detector');
+        }
+
+        const updated = updatedFossyRules.rules.find((r) => r.uuid === ruleId);
+        return updated ? (updated as IFossyRule) : null;
+    }
+
+    /**
+     * Write the rule's declared context need (issue #1826).
+     *
+     * Same shape as `updateRuleDetector`, including the deliberate `null`
+     * pass-through that clears a stale value, plus one extra rule: an
+     * author-sourced need is never overwritten by an inferred one (KRC-11).
+     * The compiler guesses about the customer's rule; the customer does not.
+     */
+    async updateRuleContextNeed(
+        organizationId: string,
+        ruleId: string,
+        contextNeed: IFossyRuleContextNeed | null,
+    ): Promise<IFossyRule | null> {
+        const existing = await this.findByOrganizationId(organizationId);
+        if (!existing) {
+            throw new NotFoundException(
+                'Fossy rules not found for organization',
+            );
+        }
+
+        const existingRule = existing.rules?.find((r) => r.uuid === ruleId);
+        if (!existingRule) {
+            throw new NotFoundException('Rule not found');
+        }
+
+        if (
+            existingRule.contextNeed?.source === 'author' &&
+            contextNeed?.source !== 'author'
+        ) {
+            return existingRule as IFossyRule;
+        }
+
+        const updatedRule = {
+            ...existingRule,
+            // `null` passes through as-is: updateRule skips only `undefined`,
+            // so this writes `$set rules.$.contextNeed = null` and clears a
+            // stale inference instead of silently no-op-ing the clear.
+            contextNeed: contextNeed,
+            updatedAt: new Date(),
+        } as IFossyRule;
+
+        const updatedFossyRules = await this.updateRule(
+            existing.uuid,
+            ruleId,
+            updatedRule,
+        );
+
+        if (!updatedFossyRules) {
+            this.logger.error({
+                message: 'Could not update rule context need',
+                error: new Error('Could not update rule context need'),
+                context: FossyRulesService.name,
+                metadata: { organizationId, ruleId },
+            });
+            throw new Error('Could not update rule context need');
+        }
+
+        const updated = updatedFossyRules.rules.find((r) => r.uuid === ruleId);
+        return updated ? (updated as IFossyRule) : null;
+    }
+
+    /**
+     * Write the rule's inferred language scope (issue #1826).
+     *
+     * Same contract as `updateRuleContextNeed`: `null` passes through to clear
+     * a stale value, and an author-sourced scope is never overwritten by an
+     * inferred one. Kept as its own method rather than folded into that one
+     * because the two are independent — a rule can go stale on its scope while
+     * its context need is still correct, and vice versa.
+     */
+    async updateRuleFileScope(
+        organizationId: string,
+        ruleId: string,
+        fileScope: IFossyRuleFileScope | null,
+    ): Promise<IFossyRule | null> {
+        const existing = await this.findByOrganizationId(organizationId);
+        if (!existing) {
+            throw new NotFoundException(
+                'Fossy rules not found for organization',
+            );
+        }
+
+        const existingRule = existing.rules?.find((r) => r.uuid === ruleId);
+        if (!existingRule) {
+            throw new NotFoundException('Rule not found');
+        }
+
+        if (
+            existingRule.fileScope?.source === 'author' &&
+            fileScope?.source !== 'author'
+        ) {
+            return existingRule as IFossyRule;
+        }
+
+        const updatedRule = {
+            ...existingRule,
+            // `null` passes through as-is (updateRule skips only `undefined`),
+            // so an edited rule that no longer names a language gets its scope
+            // CLEARED instead of keeping a narrowing nobody can see.
+            fileScope: fileScope,
+            updatedAt: new Date(),
+        } as IFossyRule;
+
+        const updatedFossyRules = await this.updateRule(
+            existing.uuid,
+            ruleId,
+            updatedRule,
+        );
+
+        if (!updatedFossyRules) {
+            this.logger.error({
+                message: 'Could not update rule file scope',
+                error: new Error('Could not update rule file scope'),
+                context: FossyRulesService.name,
+                metadata: { organizationId, ruleId },
+            });
+            throw new Error('Could not update rule file scope');
+        }
+
+        const updatedFileScopeRule = updatedFossyRules.rules.find(
+            (r) => r.uuid === ruleId,
+        );
+        return updatedFileScopeRule ? (updatedFileScopeRule as IFossyRule) : null;
+    }
+
+    /**
+     * Record a compiler attempt. Simpler than its two siblings on purpose:
+     * there is no author-owned variant to protect, because an attempt is a fact
+     * about what the system did, not a preference about the rule. `null` clears
+     * it and forces a recompile on the next sweep.
+     */
+    async updateRuleCompileAttempt(
+        organizationId: string,
+        ruleId: string,
+        compileAttempt: IFossyRuleCompileAttempt | null,
+    ): Promise<IFossyRule | null> {
+        const existing = await this.findByOrganizationId(organizationId);
+        if (!existing) {
+            throw new NotFoundException(
+                'Fossy rules not found for organization',
+            );
+        }
+
+        const existingRule = existing.rules?.find((r) => r.uuid === ruleId);
+        if (!existingRule) {
+            throw new NotFoundException('Rule not found');
+        }
+
+        const updatedRule = {
+            ...existingRule,
+            compileAttempt: compileAttempt,
+            updatedAt: new Date(),
+        } as IFossyRule;
+
+        const updatedFossyRules = await this.updateRule(
+            existing.uuid,
+            ruleId,
+            updatedRule,
+        );
+
+        if (!updatedFossyRules) {
+            this.logger.error({
+                message: 'Could not update rule compile attempt',
+                error: new Error('Could not update rule compile attempt'),
+                context: FossyRulesService.name,
+                metadata: { organizationId, ruleId },
+            });
+            throw new Error('Could not update rule compile attempt');
+        }
+
+        const updatedAttemptRule = updatedFossyRules.rules.find(
+            (r) => r.uuid === ruleId,
+        );
+        return updatedAttemptRule ? (updatedAttemptRule as IFossyRule) : null;
+    }
+
+    async updateRuleWithLogging(
+        organizationAndTeamData: OrganizationAndTeamData,
+        fossyRule: CreateFossyRuleDto,
+        userInfo?: UserInfo,
+    ): Promise<Partial<IFossyRule> | IFossyRule | null> {
+        const existing = await this.findByOrganizationId(
+            organizationAndTeamData.organizationId,
+        );
+
+        if (!existing) {
+            throw new NotFoundException('Organization rules not found');
+        }
+
+        const existingRule = existing.rules.find(
+            (rule) => rule.uuid === fossyRule.uuid,
+        );
+
+        if (!existingRule) {
+            throw new NotFoundException('Rule not found');
+        }
+
+        // Normalize severity on the way in (create/addRule already do this);
+        // otherwise an update could persist a mixed-case severity that only
+        // looks consistent because find() lower-cases on read.
+        const mergedSeverity = (
+            fossyRule.severity ?? existingRule.severity
+        )?.toLowerCase();
+
+        const updatedRule = {
+            ...existingRule,
+            ...fossyRule,
+            ...(mergedSeverity ? { severity: mergedSeverity } : {}),
+            updatedAt: new Date(),
+        };
+
+        // Same stale-summary treatment as createOrUpdate: text changed →
+        // drop the carried-over summary and schedule a fresh one below.
+        const ruleTextChanged =
+            fossyRule.rule !== undefined && fossyRule.rule !== existingRule.rule;
+        // Examples gate the atom detectors (atoms sourceHash covers them), so
+        // an examples-only edit invalidates the DECOMPOSITION — but not the
+        // summary, whose hash covers the rule text alone and stays valid as
+        // the fallback while fresh atoms are regenerated.
+        const examplesChanged =
+            fossyRule.examples !== undefined &&
+            JSON.stringify(fossyRule.examples) !==
+                JSON.stringify(existingRule.examples);
+        if (ruleTextChanged) {
+            delete (updatedRule as Partial<IFossyRule>).summary;
+            delete (updatedRule as Partial<IFossyRule>).atoms;
+        } else if (examplesChanged) {
+            delete (updatedRule as Partial<IFossyRule>).atoms;
+        }
+
+        const updatedFossyRules = await this.updateRule(
+            existing.uuid,
+            fossyRule.uuid,
+            updatedRule,
+        );
+
+        if (updatedFossyRules && (ruleTextChanged || examplesChanged)) {
+            this.scheduleSummaryGeneration(
+                organizationAndTeamData,
+                updatedRule,
+            );
+        }
+
+        this.eventEmitter.emit(AuditLogEvents.FOSSY_RULES, {
+            organizationAndTeamData,
+            userInfo: userInfo || {
+                userId: 'fossy-system',
+                userEmail: 'fossy@fossa.local',
+            },
+            actionType: ActionType.EDIT,
+            repository: { id: updatedRule.repositoryId },
+            directory: { id: updatedRule.directoryId },
+            oldRule: existingRule,
+            newRule: updatedRule,
+            ruleTitle: updatedRule.title,
+        });
+
+        if (!updatedFossyRules) {
+            throw new Error('Could not update rule');
+        }
+
+        return updatedFossyRules.rules.find(
+            (rule) => rule.uuid === fossyRule.uuid,
+        );
+    }
+
+    async deleteRule(uuid: string, ruleId: string): Promise<boolean> {
+        return this.fossyRulesRepository.deleteRule(uuid, ruleId);
+    }
+
+    async updateRulesStatusByFilter(
+        organizationId: string,
+        repositoryId: string,
+        directoryId?: string,
+        newStatus: FossyRulesStatus = FossyRulesStatus.DELETED,
+    ): Promise<FossyRulesEntity | null> {
+        try {
+            const result =
+                await this.fossyRulesRepository.updateRulesStatusByFilter(
+                    organizationId,
+                    repositoryId,
+                    directoryId,
+                    newStatus,
+                );
+
+            if (result) {
+                this.logger.log({
+                    message: 'Fossy rules status updated successfully by filter',
+                    context: FossyRulesService.name,
+                    metadata: {
+                        organizationId,
+                        repositoryId,
+                        directoryId,
+                        newStatus,
+                    },
+                });
+            }
+
+            return result;
+        } catch (error) {
+            this.logger.error({
+                message: 'Error updating Fossy rules status by filter',
+                context: FossyRulesService.name,
+                error: error,
+                metadata: {
+                    organizationId,
+                    repositoryId,
+                    directoryId,
+                    newStatus,
+                },
+            });
+            throw error;
+        }
+    }
+
+    async deleteRuleLogically(
+        uuid: string,
+        ruleId: string,
+    ): Promise<FossyRulesEntity | null> {
+        return this.fossyRulesRepository.deleteRuleLogically(uuid, ruleId);
+    }
+
+    async deleteRuleWithLogging(
+        organizationAndTeamData: OrganizationAndTeamData,
+        ruleId: string,
+        userInfo: UserInfo,
+    ): Promise<boolean> {
+        try {
+            const existing = await this.findByOrganizationId(
+                organizationAndTeamData.organizationId,
+            );
+
+            if (!existing?.rules?.length) {
+                return false;
+            }
+
+            const deletedRule = existing.rules.find(
+                (rule) => rule.uuid === ruleId,
+            );
+            if (!deletedRule) {
+                return false;
+            }
+
+            const rule = await this.deleteRuleLogically(existing.uuid, ruleId);
+
+            this.eventEmitter.emit(AuditLogEvents.FOSSY_RULES, {
+                organizationAndTeamData,
+                userInfo,
+                actionType: ActionType.DELETE,
+                repository: { id: deletedRule.repositoryId },
+                oldRule: deletedRule,
+                newRule: undefined,
+                ruleTitle: deletedRule.title,
+            });
+
+            return !!rule;
+        } catch (error) {
+            this.logger.error({
+                message: 'Error deleting rule with logging',
+                error: error,
+                context: FossyRulesService.name,
+                metadata: {
+                    ...organizationAndTeamData,
+                    ruleId,
+                    userInfo,
+                },
+            });
+            throw error;
+        }
+    }
+
+    /**
+     * Resolves the status a rule should actually land in, given the free
+     * plan's active-rule quota. Rather than rejecting the request outright,
+     * a rule that would push the org over the quota is created/reactivated
+     * as `PAUSED` with `lockedByPlan: true` — same "value-forward" pattern
+     * as MCP plugins beyond their cap: it's created, just not enforced,
+     * and the web UI shows it as Locked with an upgrade CTA instead of
+     * making it vanish or hard-blocking the action.
+     *
+     * Only meaningful when `requestedStatus` is ACTIVE — anything else
+     * (paused/pending/rejected/deleted) never consumes quota and passes
+     * through unchanged.
+     */
+    private async resolveStatusWithinPlanLimit(
+        organizationAndTeamData: OrganizationAndTeamData,
+        requestedStatus: FossyRulesStatus,
+        totalRulesAfterOperation: number,
+    ): Promise<{ status: FossyRulesStatus; lockedByPlan: boolean }> {
+        if (
+            requestedStatus !== FossyRulesStatus.ACTIVE ||
+            !organizationAndTeamData?.organizationId
+        ) {
+            return { status: requestedStatus, lockedByPlan: false };
+        }
+
+        try {
+            const withinLimit =
+                await this.fossyRulesValidationService.validateRulesLimit(
+                    organizationAndTeamData,
+                    totalRulesAfterOperation,
+                );
+
+            if (withinLimit) {
+                return { status: FossyRulesStatus.ACTIVE, lockedByPlan: false };
+            }
+        } catch (error) {
+            this.logger.error({
+                message:
+                    'Error validating Fossy Rules limit - locking rule for safety',
+                error: error,
+                context: FossyRulesService.name,
+                metadata: {
+                    organizationAndTeamData,
+                    totalRulesAfterOperation,
+                },
+            });
+            // Fail closed: same outcome as hitting the cap, but the rule
+            // still gets created/reactivated instead of the request erroring.
+        }
+
+        return { status: FossyRulesStatus.PAUSED, lockedByPlan: true };
+    }
+
+    private addLanguageToRule(
+        fossyRule: LibraryFossyRule,
+        language: ProgrammingLanguage,
+    ): LibraryFossyRule & { language: ProgrammingLanguage } {
+        // Returns only the necessary fields
+        return {
+            uuid: fossyRule.uuid,
+            title: fossyRule.title,
+            rule: fossyRule.rule,
+            why_is_this_important: fossyRule.why_is_this_important,
+            severity: fossyRule.severity,
+            tags: fossyRule.tags,
+            examples: fossyRule.examples || [],
+            language,
+        };
+    }
+
+    async getLibraryFossyRules(
+        filters?: FossyRuleFilters,
+        userId?: string,
+    ): Promise<LibraryFossyRule[]> {
+        return this.getLibraryFossyRulesInternal(filters, userId, false);
+    }
+
+    async getLibraryFossyRulesWithFeedback(
+        filters?: FossyRuleFilters,
+        userId?: string,
+    ): Promise<LibraryFossyRule[]> {
+        return this.getLibraryFossyRulesInternal(filters, userId, true);
+    }
+
+    private async getLibraryFossyRulesInternal(
+        filters?: FossyRuleFilters,
+        userId?: string,
+        includeFeedback: boolean = false,
+    ): Promise<LibraryFossyRule[]> {
+        try {
+            // Nova estrutura é um array direto
+            if (!Array.isArray(libraryFossyRules)) {
+                return [];
+            }
+
+            const validRules = libraryFossyRules
+                .filter(
+                    (rule) => rule && typeof rule === 'object' && rule.title,
+                )
+                .map((rule: any) => {
+                    return {
+                        ...rule,
+                        buckets: rule.buckets || [],
+                        type: FossyRulesType.STANDARD,
+                    };
+                });
+
+            // Aplica filtros se houver
+            let filteredRules = validRules;
+            if (filters) {
+                filteredRules = validRules.filter((rule) => {
+                    // Filtro por título
+                    if (
+                        filters.title &&
+                        !rule.title
+                            .toLowerCase()
+                            .includes(filters.title.toLowerCase())
+                    ) {
+                        return false;
+                    }
+
+                    // Filtro por severidade
+                    if (
+                        filters.severity &&
+                        rule.severity?.toLowerCase() !==
+                            filters.severity?.toLowerCase()
+                    ) {
+                        return false;
+                    }
+
+                    // Filtro por tags
+                    if (filters.tags && filters.tags.length > 0) {
+                        const ruleTags = rule.tags || [];
+                        const hasMatchingTag = filters.tags.some((filterTag) =>
+                            ruleTags.some((ruleTag) =>
+                                ruleTag
+                                    .toLowerCase()
+                                    .includes(filterTag.toLowerCase()),
+                            ),
+                        );
+                        if (!hasMatchingTag) {
+                            return false;
+                        }
+                    }
+
+                    // Filtro por linguagem
+                    if (filters.language) {
+                        const filterLanguage = String(
+                            filters.language,
+                        ).toLowerCase();
+                        const ruleLanguage = String(
+                            rule.language || '',
+                        ).toLowerCase();
+
+                        // Rules sem linguagem são consideradas "agnósticas" e passam no filtro
+                        if (ruleLanguage && ruleLanguage !== filterLanguage) {
+                            return false;
+                        }
+                    }
+
+                    // Filtro por buckets
+                    if (filters.buckets && filters.buckets.length > 0) {
+                        const ruleBuckets = rule.buckets || [];
+                        const hasMatchingBucket = filters.buckets.some(
+                            (filterBucket) =>
+                                ruleBuckets.includes(filterBucket),
+                        );
+                        if (!hasMatchingBucket) {
+                            return false;
+                        }
+                    }
+
+                    // Filtro por plug_and_play
+                    if (
+                        filters.plug_and_play !== undefined &&
+                        filters.plug_and_play !== null
+                    ) {
+                        if (rule.plug_and_play !== filters.plug_and_play) {
+                            return false;
+                        }
+                    }
+
+                    return true;
+                });
+            }
+
+            // Se deve incluir feedback, busca dados de feedback
+            if (includeFeedback) {
+                try {
+                    const feedbackData =
+                        await this.ruleLikeService.getAllRulesWithFeedback(
+                            userId,
+                        );
+
+                    const feedbackMap = new Map(
+                        feedbackData.map((f) => [f.ruleId, f]),
+                    );
+
+                    return filteredRules.map((rule) => {
+                        const feedback = feedbackMap.get(rule.uuid);
+                        return {
+                            ...rule,
+                            positiveCount: feedback?.positiveCount || 0,
+                            negativeCount: feedback?.negativeCount || 0,
+                            // Só inclui userFeedback se userId foi fornecido
+                            userFeedback: userId
+                                ? feedback?.userFeedback || null
+                                : null,
+                        };
+                    });
+                } catch (error) {
+                    this.logger.error({
+                        message: 'Error fetching feedback data',
+                        error: error,
+                        context: FossyRulesService.name,
+                        metadata: {
+                            userId,
+                            includeFeedback,
+                        },
+                    });
+                    // Se erro ao buscar feedback, retorna sem feedback
+                    return filteredRules;
+                }
+            }
+
+            return filteredRules;
+        } catch (error) {
+            this.logger.error({
+                message: 'Error in getLibraryFossyRules',
+                error: error,
+                context: FossyRulesService.name,
+                metadata: {
+                    filters,
+                    userId,
+                    includeFeedback,
+                },
+            });
+            return [];
+        }
+    }
+
+    async getLibraryFossyRulesBuckets(): Promise<BucketInfo[]> {
+        try {
+            if (!Array.isArray(bucketsData)) {
+                return [];
+            }
+
+            // Create a map of rule counts per bucket for better performance O(M+N)
+            const bucketRuleCounts = libraryFossyRules.reduce(
+                (acc, rule: LibraryFossyRule) => {
+                    if (rule.buckets?.length) {
+                        rule.buckets.forEach((bucketSlug: string) => {
+                            acc.set(bucketSlug, (acc.get(bucketSlug) || 0) + 1);
+                        });
+                    }
+                    return acc;
+                },
+                new Map<string, number>(),
+            );
+
+            const bucketsWithCount: BucketInfo[] = bucketsData.map(
+                (bucket) => ({
+                    slug: bucket.slug,
+                    title: bucket.title,
+                    description: bucket.description,
+                    rulesCount: bucketRuleCounts.get(bucket.slug) || 0,
+                }),
+            );
+
+            return bucketsWithCount;
+        } catch (error) {
+            this.logger.error({
+                message: 'Error in getLibraryFossyRulesBuckets',
+                error: error,
+                context: FossyRulesService.name,
+            });
+            return [];
+        }
+    }
+
+    async getRecommendedRulesBySuggestions(
+        organizationAndTeamData: OrganizationAndTeamData,
+        repositoryId: string,
+        repoLanguage?: string,
+    ): Promise<LibraryFossyRule[]> {
+        try {
+            const recentPRs =
+                await this.pullRequestsRepository.findRecentByRepositoryId(
+                    organizationAndTeamData.organizationId,
+                    repositoryId,
+                    10,
+                );
+
+            if (!recentPRs || recentPRs.length === 0) {
+                this.logger.log({
+                    message: 'No recent PRs found for recommendations',
+                    context: FossyRulesService.name,
+                    metadata: {
+                        organizationId: organizationAndTeamData.organizationId,
+                        repositoryId,
+                    },
+                });
+                return [];
+            }
+
+            const allSuggestions = recentPRs
+                .flatMap((pr) => {
+                    const prObj = pr.toObject();
+                    return (
+                        prObj.files?.flatMap(
+                            (file) =>
+                                file.suggestions?.map((suggestion) => ({
+                                    label: suggestion.label,
+                                    severity: suggestion.severity,
+                                    suggestionContent:
+                                        suggestion.suggestionContent,
+                                    oneSentenceSummary:
+                                        suggestion.oneSentenceSummary,
+                                })) || [],
+                        ) || []
+                    );
+                })
+                .filter(Boolean)
+                .slice(0, 50);
+
+            if (allSuggestions.length === 0) {
+                this.logger.log({
+                    message: 'No suggestions found in recent PRs',
+                    context: FossyRulesService.name,
+                    metadata: {
+                        organizationId: organizationAndTeamData.organizationId,
+                        repositoryId,
+                    },
+                });
+                return [];
+            }
+
+            const filteredLibrary = (libraryFossyRules as LibraryFossyRule[])
+                .filter((rule) => {
+                    if (!repoLanguage)
+                        return !rule.language || rule.language === '';
+                    return (
+                        !rule.language ||
+                        rule.language === '' ||
+                        rule.language === repoLanguage
+                    );
+                })
+                .map((rule) => ({
+                    uuid: rule.uuid,
+                    title: rule.title,
+                    rule: rule.rule,
+                    buckets: rule.buckets,
+                    severity: rule.severity,
+                }));
+
+            // native: resolve the codeReview task to a carrier for
+            // runStructuredReviewCall; non-v2/managed/BLOCKED → env default.
+            const byokConfigValue =
+                await this.permissionValidationService.resolveTaskSlot(
+                    organizationAndTeamData,
+                    LLM_TASK.codeReview,
+                );
+
+            const mainRun = 'fossyRulesRecommendationFromSuggestions';
+
+            const systemPrompt = `You are a code quality expert analyzing past code review suggestions to recommend relevant Fossy Rules.
+
+## What are Fossy Rules?
+Fossy Rules are reusable code review guidelines that help enforce best practices. Each rule has:
+- title: Short descriptive name
+- rule: The guideline to follow
+- buckets: Categories like "error-handling", "security-hardening", "maintainability"
+- severity: low | medium | high | critical
+- language: Programming language (empty = language-agnostic)
+
+## Your Task
+Analyze the provided code review suggestions and identify PATTERNS of issues.
+Then recommend rules from the library that would help prevent these patterns.
+
+## Important Guidelines
+1. Look for RECURRING patterns, not one-off issues
+2. Recommend rules that address the ROOT CAUSE, not symptoms
+3. Prefer rules with higher severity (critical/high) when relevant
+4. Maximum 7 recommendations
+5. Each recommendation needs a clear reason explaining the pattern you identified
+
+## Output Format
+Return ONLY a JSON object (no markdown, no code fences):
+{
+  "recommendations": [
+    {
+      "uuid": "rule-uuid-from-library",
+      "reason": "Pattern identified: X. This rule helps because Y.",
+      "relevanceScore": 8
+    }
+  ]
+}`;
+
+            const userPrompt = `## Recent Code Review Suggestions (patterns to analyze):
+${JSON.stringify(allSuggestions)}
+
+## Available Rules Library (filtered by language):
+${JSON.stringify(filteredLibrary)}
+
+Analyze the suggestions and recommend the most relevant rules.`;
+
+            const result = await LLM.run({
+                byokConfig: byokConfigValue ?? undefined,
+                schema: fossyRulesRecommendationSchema,
+                system: systemPrompt,
+                user: userPrompt,
+                runName: `${FossyRulesService.name}::${mainRun}`,
+                organizationId: organizationAndTeamData.organizationId,
+                attrs: {
+                    repositoryId,
+                    suggestionsCount: allSuggestions.length,
+                    libraryRulesCount: filteredLibrary.length,
+                },
+            });
+
+            if (
+                !result?.recommendations ||
+                result.recommendations.length === 0
+            ) {
+                return [];
+            }
+
+            const recommendedUUIDs = result.recommendations.map((r) => r.uuid);
+            const recommendedRules = (
+                libraryFossyRules as LibraryFossyRule[]
+            ).filter((rule) => recommendedUUIDs.includes(rule.uuid));
+
+            return recommendedRules;
+        } catch (error) {
+            this.logger.error({
+                message: 'Error in getRecommendedRulesBySuggestions',
+                error: error,
+                context: FossyRulesService.name,
+                metadata: {
+                    organizationId: organizationAndTeamData.organizationId,
+                    repositoryId,
+                },
+            });
+            return [];
+        }
+    }
+
+    async createOrUpdateMemory(
+        organizationAndTeamData: OrganizationAndTeamData,
+        memory: IFossyRuleMemory,
+        userInfo?: UserInfo,
+    ): Promise<CreateOrUpdateMemoryResult | null> {
+        try {
+            const resolution = await this.resolveGeneratedMemoryAction(
+                organizationAndTeamData,
+                memory,
+            );
+
+            if (resolution?.action === 'skip' && resolution.existingMemory) {
+                return {
+                    rule: resolution.existingMemory,
+                    action: 'skipped',
+                    requiresApproval: false,
+                    link: this.buildMemoryLink(
+                        resolution.existingMemory.repositoryId,
+                        resolution.existingMemory.uuid,
+                        organizationAndTeamData.teamId,
+                        resolution.existingMemory.status,
+                    ),
+                };
+            }
+
+            const memoryToPersist =
+                resolution && resolution.action !== 'skip'
+                    ? resolution.memoryToPersist
+                    : memory;
+
+            const requiresApproval =
+                await this.shouldRequireApprovalForGeneratedMemory(
+                    organizationAndTeamData,
+                    memoryToPersist,
+                );
+
+            const targetMemory =
+                resolution?.action === 'update'
+                    ? resolution.targetMemory
+                    : null;
+            const isTargetUserOrigin = !isGeneratedFossyRuleOrigin(
+                targetMemory?.origin,
+            );
+            const isTargetGeneratedNeedsApproval =
+                isGeneratedFossyRuleOrigin(targetMemory?.origin) &&
+                requiresApproval;
+
+            if (
+                targetMemory?.uuid &&
+                (isTargetUserOrigin || isTargetGeneratedNeedsApproval)
+            ) {
+                return await this.createPendingRequest(
+                    organizationAndTeamData,
+                    memoryToPersist,
+                    userInfo,
+                    FossyRuleRequestType.UPDATE,
+                    targetMemory.uuid,
+                );
+            }
+
+            if (requiresApproval && !memoryToPersist.uuid) {
+                return await this.createPendingRequest(
+                    organizationAndTeamData,
+                    memoryToPersist,
+                    userInfo,
+                    FossyRuleRequestType.CREATE,
+                );
+            }
+
+            const operation =
+                resolution?.action === 'update' ? 'update' : 'create';
+
+            const { rule, linkOverride } =
+                await this.createOrUpdateMemoryWithCentralizedRouting(
+                    organizationAndTeamData,
+                    memoryToPersist,
+                    userInfo,
+                    operation,
+                    requiresApproval,
+                );
+
+            if (!rule) return null;
+
+            const action =
+                operation === 'update'
+                    ? ('updated' as const)
+                    : ('created' as const);
+
+            return {
+                rule,
+                action,
+                requiresApproval,
+                link:
+                    linkOverride ||
+                    this.buildMemoryLink(
+                        rule.repositoryId,
+                        rule.uuid,
+                        organizationAndTeamData.teamId,
+                        rule.status,
+                    ),
+            };
+        } catch (error) {
+            this.logger.error({
+                message: 'Error in createOrUpdateMemory',
+                error: error,
+                context: FossyRulesService.name,
+                metadata: {
+                    organizationAndTeamData,
+                    memory,
+                    userInfo,
+                },
+            });
+            throw error;
+        }
+    }
+
+    private async createOrUpdateMemoryWithCentralizedRouting(
+        organizationAndTeamData: OrganizationAndTeamData,
+        memory: IFossyRuleMemory,
+        userInfo: UserInfo | undefined,
+        operation: 'create' | 'update',
+        requiresApproval: boolean,
+    ): Promise<{
+        rule: Partial<IFossyRule> | IFossyRule | null;
+        linkOverride?: string;
+    }> {
+        const payload = {
+            ...this.getBaseMemoryPayload(memory),
+            status: requiresApproval
+                ? FossyRulesStatus.PENDING
+                : memory.status || FossyRulesStatus.ACTIVE,
+        };
+
+        const ccp = await this.resolveCentralizedConfigPrService();
+        const memoryGroupFolderName = await ccp.resolveDirectoryGroupFolderName(
+            organizationAndTeamData,
+            payload.repositoryId,
+            payload.directoryId,
+        );
+        const centralizedPr = await ccp.createMutationPullRequestIfEnabled(
+            buildFossyRuleCentralizedMutationRequest({
+                centralizedConfigPrService: ccp,
+                organizationAndTeamData,
+                repositoryId: payload.repositoryId,
+                groupFolderName: memoryGroupFolderName ?? undefined,
+                ruleContent: payload,
+                ruleType: FossyRulesType.MEMORY,
+                operation,
+            }),
+        );
+
+        if (centralizedPr.mode !== 'centralized-pr') {
+            const rule = await this.createOrUpdate(
+                organizationAndTeamData,
+                payload,
+                userInfo,
+            );
+
+            return { rule };
+        }
+
+        const persistedPending =
+            await this.persistMemoryCentralizedPendingStatus(
+                organizationAndTeamData,
+                payload,
+                operation,
+                userInfo,
+            );
+
+        return {
+            rule: persistedPending || payload,
+            linkOverride: centralizedPr.prUrl || '',
+        };
+    }
+
+    private async persistMemoryCentralizedPendingStatus(
+        organizationAndTeamData: OrganizationAndTeamData,
+        memoryPayload: Partial<IFossyRule>,
+        operation: 'create' | 'update',
+        userInfo?: UserInfo,
+    ): Promise<Partial<IFossyRule> | IFossyRule | null> {
+        if (!memoryPayload.title || !memoryPayload.repositoryId) {
+            return null;
+        }
+
+        const ccp = await this.resolveCentralizedConfigPrService();
+        const repositoryFolder = await ccp.resolveRepositoryFolderName(
+            organizationAndTeamData,
+            memoryPayload.repositoryId,
+        );
+
+        const centralizedPath = buildFossyRuleCentralizedFilePath({
+            centralizedConfigPrService: ccp,
+            repositoryFolder,
+            rulesDirectory: 'memories',
+            ruleContent: memoryPayload,
+        });
+
+        if (operation === 'update' && !memoryPayload.uuid) {
+            return null;
+        }
+
+        return this.createOrUpdate(
+            organizationAndTeamData,
+            {
+                ...(memoryPayload as CreateFossyRuleDto),
+                type: FossyRulesType.MEMORY,
+                centralizedConfig: {
+                    path: centralizedPath,
+                    status:
+                        operation === 'create'
+                            ? FossyRuleCentralizedStatus.PENDING_ADD
+                            : FossyRuleCentralizedStatus.PENDING_EDIT,
+                },
+            },
+            userInfo,
+        );
+    }
+
+    private async shouldRequireApprovalForGeneratedMemory(
+        organizationAndTeamData: OrganizationAndTeamData,
+        memory: IFossyRuleMemory,
+    ): Promise<boolean> {
+        if (
+            !memory.origin ||
+            !organizationAndTeamData?.organizationId ||
+            !organizationAndTeamData?.teamId
+        ) {
+            return false;
+        }
+
+        try {
+            const mergedConfig =
+                await this.codeBaseConfigService.getSimpleConfig(
+                    organizationAndTeamData,
+                    {
+                        repositoryId: memory.repositoryId,
+                        directoryId: memory.directoryId,
+                    },
+                );
+
+            return requiresKnowledgeApproval(
+                mergedConfig.fossyKnowledgeApproval,
+                memory.origin,
+            );
+        } catch (error) {
+            this.logger.error({
+                message:
+                    'Error resolving fossyKnowledgeApproval, defaulting to active memories',
+                error,
+                context: FossyRulesService.name,
+                metadata: {
+                    organizationAndTeamData,
+                    repositoryId: memory.repositoryId,
+                    directoryId: memory.directoryId,
+                },
+            });
+            return false;
+        }
+    }
+
+    private async resolveGeneratedMemoryAction(
+        organizationAndTeamData: OrganizationAndTeamData,
+        memory: IFossyRuleMemory,
+    ): Promise<
+        | {
+              action: 'create';
+              memoryToPersist: IFossyRuleMemory;
+          }
+        | {
+              action: 'skip';
+              existingMemory: Partial<IFossyRule>;
+          }
+        | {
+              action: 'update';
+              memoryToPersist: IFossyRuleMemory;
+              targetMemory: Partial<IFossyRule>;
+          }
+        | null
+    > {
+        if (!isGeneratedFossyRuleOrigin(memory.origin) || memory.uuid) {
+            return null;
+        }
+
+        try {
+            const entity = await this.findByOrganizationId(
+                organizationAndTeamData.organizationId,
+            );
+
+            const existingMemories = (entity?.rules || []).filter(
+                (rule) =>
+                    rule.type === FossyRulesType.MEMORY &&
+                    rule.status === FossyRulesStatus.ACTIVE,
+            );
+
+            if (!existingMemories.length) {
+                return {
+                    action: 'create',
+                    memoryToPersist: memory,
+                };
+            }
+
+            const result = await this.evaluateMemoryActionViaLLM(
+                organizationAndTeamData,
+                memory,
+                existingMemories,
+            );
+
+            if (!result?.action || result.action === 'create') {
+                return { action: 'create', memoryToPersist: memory };
+            }
+
+            const matchedMemory =
+                existingMemories.find(
+                    (m) => m.uuid === result.targetMemoryUuid,
+                ) ||
+                existingMemories.find((m) =>
+                    this.isExactMemoryMatch(m, memory),
+                );
+
+            if (result.action === 'skip' && matchedMemory) {
+                return { action: 'skip', existingMemory: matchedMemory };
+            }
+
+            if (result.action === 'update' && matchedMemory?.uuid) {
+                return {
+                    action: 'update',
+                    memoryToPersist: {
+                        ...memory,
+                        uuid: matchedMemory.uuid,
+                        title: result.updatedTitle?.trim() || memory.title,
+                        rule: result.updatedRule?.trim() || memory.rule,
+                    },
+                    targetMemory: matchedMemory,
+                };
+            }
+
+            return { action: 'create', memoryToPersist: memory };
+        } catch (error) {
+            this.logger.error({
+                message:
+                    'Error resolving generated memory action - defaulting to create',
+                error,
+                context: FossyRulesService.name,
+                metadata: {
+                    organizationAndTeamData,
+                    memory,
+                },
+            });
+
+            return {
+                action: 'create',
+                memoryToPersist: memory,
+            };
+        }
+    }
+
+    private async createPendingRequest(
+        orgData: OrganizationAndTeamData,
+        memory: IFossyRuleMemory,
+        userInfo: UserInfo | undefined,
+        requestType: FossyRuleRequestType,
+        targetRuleUuid?: string,
+    ): Promise<CreateOrUpdateMemoryResult | null> {
+        const rule = await this.createOrUpdate(
+            orgData,
+            {
+                ...this.getBaseMemoryPayload(memory),
+                uuid: undefined,
+                status: FossyRulesStatus.PENDING,
+                requestType,
+                targetRuleUuid,
+            },
+            userInfo,
+        );
+
+        return rule
+            ? {
+                  rule,
+                  action: 'created',
+                  requiresApproval: true,
+                  link: this.buildMemoryLink(
+                      rule.repositoryId,
+                      rule.uuid,
+                      orgData.teamId,
+                      rule.status,
+                  ),
+              }
+            : null;
+    }
+
+    private getBaseMemoryPayload(memory: IFossyRuleMemory) {
+        return {
+            ...memory,
+            path: memory.path || null,
+            origin: memory.origin ?? FossyRulesOrigin.MANUAL,
+            severity: FossyRuleSeverity.MEDIUM,
+            examples: [],
+            inheritance: {
+                inheritable: true,
+                exclude: [],
+                include: [],
+            },
+        };
+    }
+
+    private isExactMemoryMatch(
+        existingMemory: Partial<IFossyRule>,
+        incomingMemory: IFossyRuleMemory,
+    ): boolean {
+        return (
+            this.normalizeMemoryText(existingMemory.title) ===
+                this.normalizeMemoryText(incomingMemory.title) &&
+            this.normalizeMemoryText(existingMemory.rule) ===
+                this.normalizeMemoryText(incomingMemory.rule)
+        );
+    }
+
+    private normalizeMemoryText(value?: string): string {
+        return (value || '').toLowerCase().trim().replace(/\s+/g, ' ');
+    }
+
+    private async evaluateMemoryActionViaLLM(
+        organizationAndTeamData: OrganizationAndTeamData,
+        memory: IFossyRuleMemory,
+        existingMemories: Partial<IFossyRule>[],
+    ) {
+        // native: resolve the codeReview task to a carrier for
+        // runStructuredReviewCall; non-v2/managed/BLOCKED → env default.
+        const byokConfigValue =
+            await this.permissionValidationService.resolveTaskSlot(
+                organizationAndTeamData,
+                LLM_TASK.codeReview,
+            );
+        const runName = 'fossyMemoryResolution';
+
+        const incomingMemory = {
+            title: memory.title,
+            rule: memory.rule,
+            repositoryId: memory.repositoryId,
+            directoryId: memory.directoryId,
+            path: memory.path || undefined,
+        };
+
+        const existingForPrompt = existingMemories.map((existingMemory) => ({
+            uuid: existingMemory.uuid,
+            title: existingMemory.title,
+            rule: existingMemory.rule,
+            repositoryId: existingMemory.repositoryId,
+            directoryId: existingMemory.directoryId,
+            path: existingMemory.path,
+        }));
+
+        const result = await LLM.run({
+            byokConfig: byokConfigValue ?? undefined,
+            schema: fossyMemoryResolutionSchema,
+            system: prompt_fossyMemoryResolution_system(),
+            user: prompt_fossyMemoryResolution_user({
+                incomingMemory,
+                existingMemories: existingForPrompt,
+            }),
+            runName,
+            organizationId: organizationAndTeamData.organizationId,
+            attrs: {
+                existingMemoriesCount: existingMemories.length,
+            },
+        });
+
+        return result;
+    }
+
+    async findMemories(
+        organizationAndTeamData: OrganizationAndTeamData,
+        filters?: FindMemoriesFilters,
+    ): Promise<FindMemoriesResult[]> {
+        try {
+            const entity = await this.findByOrganizationId(
+                organizationAndTeamData.organizationId,
+            );
+
+            if (!entity?.rules?.length) {
+                return [];
+            }
+
+            const safeLimit = Math.min(Math.max(filters?.limit ?? 20, 1), 20);
+            const normalizedKeywords = (filters?.keywords || [])
+                .map((keyword) => keyword?.trim())
+                .filter((keyword): keyword is string => Boolean(keyword));
+            const normalizedPathFilter = filters?.path?.trim();
+
+            const inheritedMemories =
+                this.fossyRulesValidationService.getMemoryRulesForContext(
+                    normalizedPathFilter || null,
+                    entity.rules,
+                    {
+                        repositoryId: filters?.repositoryId,
+                        directoryId: filters?.repositoryId
+                            ? filters?.directoryId
+                            : undefined,
+                    },
+                );
+
+            const filteredMemories = inheritedMemories
+                .filter((rule): rule is IFossyRule => {
+                    if (normalizedKeywords.length === 0) {
+                        return true;
+                    }
+
+                    const haystack = `${rule.title || ''} ${rule.rule || ''}`
+                        .trim()
+                        .toLowerCase();
+
+                    if (!haystack) {
+                        return false;
+                    }
+
+                    return normalizedKeywords.some((keyword) =>
+                        haystack.includes(keyword.toLowerCase()),
+                    );
+                })
+                .sort((a, b) => {
+                    const aTime = a.createdAt
+                        ? new Date(a.createdAt).getTime()
+                        : 0;
+                    const bTime = b.createdAt
+                        ? new Date(b.createdAt).getTime()
+                        : 0;
+
+                    return bTime - aTime;
+                })
+                .slice(0, safeLimit)
+                .map((memory) => ({
+                    uuid: memory.uuid,
+                    title: memory.title,
+                    rule: memory.rule,
+                    repositoryId: memory.repositoryId,
+                    directoryId: memory.directoryId || undefined,
+                    path: memory.path || undefined,
+                    createdAt: memory.createdAt?.toISOString(),
+                    link: this.buildMemoryLink(
+                        memory.repositoryId,
+                        memory.uuid,
+                        organizationAndTeamData.teamId,
+                        memory.status,
+                    ),
+                }));
+
+            return filteredMemories;
+        } catch (error) {
+            this.logger.error({
+                message: 'Error in findMemories',
+                error,
+                context: FossyRulesService.name,
+                metadata: {
+                    organizationAndTeamData,
+                    filters,
+                },
+            });
+
+            throw error;
+        }
+    }
+
+    private buildMemoryLink(
+        repositoryId: string | null | undefined,
+        ruleId: string | undefined,
+        teamId?: string,
+        status?: FossyRulesStatus,
+    ): string {
+        return buildFossyRuleAppLink({
+            repositoryId,
+            ruleId,
+            teamId,
+            status,
+            tab: 'memories',
+        });
+    }
+}

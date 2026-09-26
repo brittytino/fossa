@@ -1,0 +1,27 @@
+---
+title: "How to set up AI code review on GitLab"
+description: "Install and configure Fossa for GitLab projects to get automated AI code review on every merge request."
+---
+
+Fossa integrates with GitLab via OAuth and webhooks. Once configured, merge requests are reviewed automatically.
+
+## Steps
+
+1. **Create an account** at [fossa.local](https://github.com/brittytino/fossa) or [self-host Fossa](/en/how_to_deploy/deploy_fossa/generic_vm)
+2. **Connect GitLab** — authorize via OAuth during setup
+3. **Configure webhooks** — follow the guided setup to enable merge request events
+4. **Select projects** — choose which GitLab projects Fossa should review
+5. **Open a merge request** — Fossa reviews it automatically
+
+## What you get
+
+- Automated reviews on every MR
+- Comments posted directly in the merge request
+- Customizable rules and suggestion controls
+- Business logic validation against linked tasks
+
+## Custom configuration
+
+Drop a `fossa-config.yml` in your repo root to customize behavior per project.
+
+For the full setup guide, see [GitLab OAuth](/en/how_to_deploy/platforms/gitlab/gitlab_oauth) and [GitLab Webhooks](/en/how_to_deploy/platforms/gitlab/gitlab_webhook).

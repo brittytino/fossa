@@ -1,0 +1,185 @@
+import { AgentsModule } from '@libs/agents/modules/agents.module';
+import { AIEngineModule } from '@libs/ai-engine/modules/ai-engine.module';
+import { AnalyticsModule } from '@libs/analytics/modules/analytics.module';
+import { FeatureGateModule } from '@libs/feature-gate/modules/feature-gate.module';
+import { TelemetryModule } from '@libs/telemetry/modules/telemetry.module';
+import { CockpitModule } from '@libs/cockpit/modules/cockpit.module';
+import { AutomationModule } from '@libs/automation/modules/automation.module';
+import { CliReviewModule } from '@libs/cli-review/cli-review.module';
+import { CodeReviewConfigurationModule } from '@libs/code-review/modules/code-review-configuration.module';
+import { CodeReviewDashboardModule } from '@libs/code-review/modules/code-review-dashboard.module';
+import { CodebaseModule } from '@libs/code-review/modules/codebase.module';
+import { PullRequestsModule } from '@libs/code-review/modules/pull-requests.module';
+import { PullRequestMessagesModule } from '@libs/code-review/modules/pullRequestMessages.module';
+import { GlobalCacheModule } from '@libs/core/cache/cache.module';
+import { HealthModule } from '@libs/core/health/health.module';
+import { IncidentModule } from '@libs/core/infrastructure/incident/incident.module';
+import { MetricsController } from '@libs/core/infrastructure/metrics/metrics.controller';
+import { MetricsModule } from '@libs/core/infrastructure/metrics/metrics.module';
+import { RabbitMQWrapperModule } from '@libs/core/infrastructure/queue/rabbitmq.module';
+import { LoggerWrapperService } from '@libs/core/log/loggerWrapper.service';
+import { WorkflowModule } from '@libs/core/workflow/modules/workflow.module';
+import { PermissionValidationModule } from '@libs/shared/infrastructure/permissions';
+import { AuthModule } from '@libs/identity/modules/auth.module';
+import { PermissionsModule } from '@libs/identity/modules/permissions.module';
+import { UserModule } from '@libs/identity/modules/user.module';
+import { IntegrationConfigModule } from '@libs/integrations/modules/config.module';
+import { IntegrationModule } from '@libs/integrations/modules/integrations.module';
+import { IssuesModule } from '@libs/issues/issues.module';
+import { FossyRulesModule } from '@libs/fossyRules/modules/fossyRules.module';
+import { FossaIssuesMcpModule } from '@libs/mcp-server/fossa-issues-mcp.module';
+import { McpModule } from '@libs/mcp-server/mcp.module';
+import { OrganizationOnboardingModule } from '@libs/organization/modules/organization-onboarding.module';
+import { OrganizationModule } from '@libs/organization/modules/organization.module';
+import { OrganizationParametersModule } from '@libs/organization/modules/organizationParameters.module';
+import { ParametersModule } from '@libs/organization/modules/parameters.module';
+import { TeamModule } from '@libs/organization/modules/team.module';
+import { TeamMembersModule } from '@libs/organization/modules/teamMembers.module';
+import { PlatformModule } from '@libs/platform/modules/platform.module';
+import { SharedMongoModule } from '@libs/shared/database/shared-mongo.module';
+import { SharedPostgresModule } from '@libs/shared/database/shared-postgres.module';
+import { SharedConfigModule } from '@libs/shared/infrastructure/shared-config.module';
+import { SharedCoreModule } from '@libs/shared/infrastructure/shared-core.module';
+import { SharedLogModule } from '@libs/shared/infrastructure/shared-log.module';
+import { SharedObservabilityModule } from '@libs/shared/infrastructure/shared-observability.module';
+import { Module } from '@nestjs/common';
+import { EventEmitterModule } from '@nestjs/event-emitter';
+import { AgentController } from './controllers/agent.controller';
+import { AuthController } from './controllers/auth.controller';
+import { CliConfigController } from './controllers/cli/cli-config.controller';
+import { CliCentralizedConfigController } from './controllers/cli/cli-centralized-config.controller';
+import { CliFossyRulesController } from './controllers/cli/cli-fossy-rules.controller';
+import { CliAuthController } from './controllers/cli-auth.controller';
+import { CliReviewController } from './controllers/cli/cli-review.controller';
+import { CliReviewsController } from './controllers/cli-reviews.controller';
+import { CodeBaseController } from './controllers/codeBase.controller';
+import { CodeManagementController } from './controllers/codeManagement.controller';
+import { GithubController } from './controllers/github.controller';
+import { IntegrationController } from './controllers/integration.controller';
+import { IntegrationConfigController } from './controllers/integrationConfig.controller';
+import { IssuesController } from './controllers/issues.controller';
+import { FossyRulesController } from './controllers/fossyRules.controller';
+import { OrganizationController } from './controllers/organization.controller';
+import { OrganizationParametersController } from './controllers/organizationParameters.controller';
+import { ParametersController } from './controllers/parameters.controller';
+import { PermissionsController } from './controllers/permissions.controller';
+import {
+    CockpitCodeHealthController,
+    CockpitController,
+    CockpitProductivityController,
+    CockpitReviewAnalyticsController,
+} from './controllers/cockpit.controller';
+import { PullRequestController } from './controllers/pullRequest.controller';
+import { PullRequestMessagesController } from './controllers/pullRequestMessages.controller';
+import { RuleLikeController } from './controllers/ruleLike.controller';
+import { SkillsController } from './controllers/skills.controller';
+import { TeamCliKeyController } from './controllers/team-cli-key.controller';
+import { TeamController } from './controllers/team.controller';
+import { TeamMembersController } from './controllers/teamMembers.controller';
+import { TokenUsageController } from './controllers/tokenUsage.controller';
+import { UsersController } from './controllers/user.controller';
+import { CronModule } from './cron/cron.module';
+import { CentralizedConfigModule } from '@libs/centralized-config/modules/centralized-config.module';
+import { LangfuseShutdownProvider } from '@libs/core/log/langfuse-shutdown.provider';
+import { NotificationModule } from '@libs/notifications/modules/notification.module';
+import { NotificationController } from './controllers/notification.controller';
+import { SelfHostedDoctorModule } from './doctor/self-hosted-doctor.module';
+
+@Module({
+    imports: [
+        // EventEmitterModule.forRoot() registers a @Global()
+        // EventEmitterCoreModule, so exactly one call per process graph is
+        // both necessary and sufficient. It used to reach the API only as a
+        // side effect of importing DryRunModule (and a second time via
+        // DryRunCoreModule) — two registrations meant two
+        // EventSubscribersLoader instances and every @OnEvent handler bound
+        // twice. Declaring it here at the root keeps a single binding and
+        // stops the emitter's availability from depending on an unrelated
+        // feature module.
+        EventEmitterModule.forRoot(),
+        SharedCoreModule,
+        SharedConfigModule,
+        SharedLogModule,
+        SharedObservabilityModule,
+        IncidentModule,
+        MetricsModule,
+        SharedPostgresModule.forRoot({ poolSize: 25 }),
+        SharedMongoModule.forRoot(),
+        RabbitMQWrapperModule.register({ enableConsumers: false }),
+        AuthModule,
+        UserModule,
+        PermissionsModule,
+        FossyRulesModule,
+        IssuesModule,
+        OrganizationModule,
+        TeamModule,
+        TeamMembersModule,
+        OrganizationParametersModule,
+        ParametersModule,
+        WorkflowModule.register({ type: 'api' }),
+        PlatformModule,
+        AIEngineModule,
+        AgentsModule,
+        CodebaseModule,
+        PullRequestsModule,
+        PullRequestMessagesModule,
+        IntegrationModule,
+        IntegrationConfigModule,
+        AnalyticsModule,
+        TelemetryModule,
+        FeatureGateModule,
+        CockpitModule,
+        AutomationModule,
+        CodeReviewConfigurationModule,
+        OrganizationOnboardingModule,
+        CodeReviewDashboardModule,
+        CliReviewModule,
+        PermissionValidationModule,
+        McpModule.forRoot(),
+        FossaIssuesMcpModule.forRoot(),
+        HealthModule,
+        CronModule,
+        GlobalCacheModule,
+        CentralizedConfigModule,
+        NotificationModule,
+        SelfHostedDoctorModule,
+    ],
+    controllers: [
+        CodeManagementController,
+        PullRequestMessagesController,
+        CodeBaseController,
+        IssuesController,
+        FossyRulesController,
+        RuleLikeController,
+        OrganizationController,
+        ParametersController,
+        OrganizationParametersController,
+        SkillsController,
+        TeamController,
+        TeamCliKeyController,
+        TeamMembersController,
+        AgentController,
+        AuthController,
+        TokenUsageController,
+        PermissionsController,
+        GithubController,
+        IntegrationController,
+        IntegrationConfigController,
+        PullRequestController,
+        UsersController,
+        CliAuthController,
+        CliReviewController,
+        CliReviewsController,
+        CliConfigController,
+        CliCentralizedConfigController,
+        CliFossyRulesController,
+        MetricsController,
+        CockpitController,
+        CockpitCodeHealthController,
+        CockpitProductivityController,
+        CockpitReviewAnalyticsController,
+        NotificationController,
+    ],
+    providers: [LangfuseShutdownProvider],
+})
+export class ApiModule {}

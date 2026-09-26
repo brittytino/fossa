@@ -1,0 +1,739 @@
+import { OrganizationParametersKey } from '@libs/core/domain/enums';
+import { UserRequest } from '@libs/core/infrastructure/config/types/http/user-request.type';
+import {
+    Action,
+    ResourceType,
+} from '@libs/identity/domain/permissions/enums/permissions.enum';
+import {
+    CheckPolicies,
+    PolicyGuard,
+} from '@libs/identity/infrastructure/adapters/services/permissions/policy.guard';
+import {
+    checkAnyPermission,
+    checkPermissions,
+} from '@libs/identity/infrastructure/adapters/services/permissions/policy.handlers';
+import { IgnoreBotsUseCase } from '@libs/organization/application/use-cases/organizationParameters/ignore-bots.use-case';
+import { CreateOrUpdateOrganizationParametersUseCase } from '@libs/organization/application/use-cases/organizationParameters/create-or-update.use-case';
+import { FindByKeyOrganizationParametersUseCase } from '@libs/organization/application/use-cases/organizationParameters/find-by-key.use-case';
+import {
+    GetModelsByProviderUseCase,
+    ModelResponse,
+} from '@libs/organization/application/use-cases/organizationParameters/get-models-by-provider.use-case';
+import {
+    GetModelCapabilitiesUseCase,
+    ModelUiCapabilities,
+} from '@libs/organization/application/use-cases/organizationParameters/get-model-capabilities.use-case';
+import { DeleteByokConfigUseCase } from '@libs/organization/application/use-cases/organizationParameters/delete-byok-config.use-case';
+import {
+    GetLLMConfigStatusUseCase,
+    LLMConfigStatus,
+} from '@libs/organization/application/use-cases/organizationParameters/get-llm-config-status.use-case';
+import {
+    GetByokProvidersUseCase,
+    ByokProvidersResult,
+} from '@libs/organization/application/use-cases/organizationParameters/get-byok-providers.use-case';
+import {
+    TestByokConnectionUseCase,
+    TestByokResult,
+} from '@libs/organization/application/use-cases/organizationParameters/test-byok-connection.use-case';
+import { TestByokModelUseCase } from '@libs/organization/application/use-cases/organizationParameters/test-byok-model.use-case';
+import {
+    ListModelOverridesUseCase,
+    ListModelOverridesResult,
+} from '@libs/organization/application/use-cases/organizationParameters/list-model-overrides.use-case';
+import { ClearModelOverridesUseCase } from '@libs/organization/application/use-cases/organizationParameters/clear-model-overrides.use-case';
+import {
+    GetCockpitMetricsVisibilityUseCase,
+    GET_COCKPIT_METRICS_VISIBILITY_USE_CASE_TOKEN,
+} from '@libs/organization/application/use-cases/organizationParameters/get-cockpit-metrics-visibility.use-case';
+import { UpdateAutoLicenseAllowedUsersUseCase } from '@libs/platform/application/use-cases/codeManagement/update-auto-license-allowed-users.use-case';
+import { ICockpitMetricsVisibility } from '@libs/organization/domain/organizationParameters/interfaces/cockpit-metrics-visibility.interface';
+
+import {
+    BadRequestException,
+    Body,
+    Controller,
+    Delete,
+    Get,
+    Inject,
+    Post,
+    Query,
+    UseGuards,
+} from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
+import {
+    ApiBody,
+    ApiBearerAuth,
+    ApiCreatedResponse,
+    ApiNoContentResponse,
+    ApiOkResponse,
+    ApiOperation,
+    ApiQuery,
+    ApiTags,
+} from '@nestjs/swagger';
+import { ApiStandardResponses } from '../docs/api-standard-responses.decorator';
+import { ProviderService } from '@libs/core/infrastructure/services/providers/provider.service';
+import {
+    OrganizationMetricsVisibilityResponseDto,
+    OrganizationParameterStoredResponseDto,
+    OrganizationProviderModelsResponseDto,
+    OrganizationProvidersResponseDto,
+} from '../dtos/organization-parameters-response.dto';
+import { ApiBooleanResponseDto } from '../dtos/api-response.dto';
+
+@ApiTags('Organization Parameters')
+@ApiBearerAuth('jwt')
+@ApiStandardResponses()
+@Controller('organization-parameters')
+export class OrganizationParametersController {
+    constructor(
+        private readonly createOrUpdateOrganizationParametersUseCase: CreateOrUpdateOrganizationParametersUseCase,
+        private readonly findByKeyOrganizationParametersUseCase: FindByKeyOrganizationParametersUseCase,
+        private readonly getModelsByProviderUseCase: GetModelsByProviderUseCase,
+        private readonly getModelCapabilitiesUseCase: GetModelCapabilitiesUseCase,
+        private readonly providerService: ProviderService,
+        private readonly deleteByokConfigUseCase: DeleteByokConfigUseCase,
+        private readonly getLLMConfigStatusUseCase: GetLLMConfigStatusUseCase,
+        private readonly getByokProvidersUseCase: GetByokProvidersUseCase,
+        private readonly testByokConnectionUseCase: TestByokConnectionUseCase,
+        private readonly testByokModelUseCase: TestByokModelUseCase,
+        private readonly listModelOverridesUseCase: ListModelOverridesUseCase,
+        private readonly clearModelOverridesUseCase: ClearModelOverridesUseCase,
+        @Inject(GET_COCKPIT_METRICS_VISIBILITY_USE_CASE_TOKEN)
+        private readonly getCockpitMetricsVisibilityUseCase: GetCockpitMetricsVisibilityUseCase,
+        private readonly ignoreBotsUseCase: IgnoreBotsUseCase,
+        private readonly updateAutoLicenseAllowedUsersUseCase: UpdateAutoLicenseAllowedUsersUseCase,
+
+        @Inject(REQUEST)
+        private readonly request: UserRequest,
+    ) {}
+
+    @Post('/create-or-update')
+    @ApiBody({
+        schema: {
+            type: 'object',
+            required: ['key', 'configValue'],
+            properties: {
+                key: {
+                    type: 'string',
+                    enum: Object.values(OrganizationParametersKey),
+                },
+                configValue: {
+                    type: 'object',
+                },
+            },
+            example: {
+                key: OrganizationParametersKey.REVIEW_MODE_CONFIG,
+                configValue: {
+                    mode: 'comment',
+                    threshold: 'medium',
+                },
+            },
+        },
+    })
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Create,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiOperation({
+        summary: 'Create or update organization parameter',
+        description: 'Create or update an organization parameter key/value.',
+    })
+    @ApiOkResponse({ type: OrganizationParameterStoredResponseDto })
+    public async createOrUpdate(
+        @Body()
+        body: {
+            key: OrganizationParametersKey;
+            configValue: any;
+        },
+    ) {
+        const organizationId = this.request?.user?.organization?.uuid;
+
+        if (!organizationId) {
+            throw new Error('Organization ID is missing from request');
+        }
+
+        return await this.createOrUpdateOrganizationParametersUseCase.execute(
+            body.key,
+            body.configValue,
+            {
+                organizationId,
+            },
+        );
+    }
+
+    @Get('/find-by-key')
+    @ApiQuery({
+        name: 'key',
+        enum: OrganizationParametersKey,
+        type: String,
+        required: true,
+    })
+    @ApiOperation({
+        summary: 'Find org parameter by key',
+        description: 'Return an organization parameter configuration by key.',
+    })
+    @ApiOkResponse({ type: OrganizationParameterStoredResponseDto })
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Read,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    public async findByKey(@Query('key') key: OrganizationParametersKey) {
+        const organizationId = this.request?.user?.organization?.uuid;
+
+        if (!organizationId) {
+            throw new Error('Organization ID is missing from request');
+        }
+
+        return await this.findByKeyOrganizationParametersUseCase.execute(key, {
+            organizationId,
+        });
+    }
+
+    @Get('/list-providers')
+    @ApiOperation({
+        summary: 'List providers',
+        description: 'Return supported model providers.',
+    })
+    @ApiOkResponse({ type: OrganizationProvidersResponseDto })
+    public async listProviders() {
+        const providers = this.providerService.getAllProviders();
+        return {
+            providers: providers.map((provider) => ({
+                id: provider.id,
+                name: provider.name,
+                description: provider.description,
+                requiresApiKey: provider.requiresApiKey,
+                requiresBaseUrl: provider.requiresBaseUrl,
+                autoListModels: provider.autoListModels,
+                listsModelsLive: provider.listsModelsLive,
+                doc: provider.doc,
+            })),
+        };
+    }
+
+    @Get('/list-models')
+    @ApiOperation({
+        summary: 'List models',
+        description: 'Return supported models for a provider.',
+    })
+    @ApiOkResponse({ type: OrganizationProviderModelsResponseDto })
+    public async listModels(
+        @Query('provider') provider: string,
+    ): Promise<ModelResponse> {
+        const organizationId = this.request?.user?.organization?.uuid;
+        return await this.getModelsByProviderUseCase.execute(
+            provider,
+            organizationId ? { organizationId } : undefined,
+        );
+    }
+
+    @Post('/list-models')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Create,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiBody({
+        schema: {
+            type: 'object',
+            required: ['provider'],
+            properties: {
+                provider: { type: 'string' },
+                apiKey: { type: 'string' },
+                baseURL: { type: 'string' },
+                awsBearerToken: { type: 'string' },
+                awsRegion: { type: 'string' },
+            },
+        },
+    })
+    @ApiOperation({
+        summary: 'List models with a candidate key',
+        description:
+            "Live-list a provider's models using a just-typed (unsaved) credential — for the connect form, before it's saved. The credential travels in the body (never a query string): `apiKey`(+`baseURL`) for most providers, `awsBearerToken`(+`awsRegion`) for Amazon Bedrock, which never authenticates with an apiKey. Falls back to the org's saved credential when none is supplied. Strict: an http provider with a candidate credential does a live `/models` call and surfaces the error instead of a curated placeholder.",
+    })
+    @ApiOkResponse({ type: OrganizationProviderModelsResponseDto })
+    public async listModelsWithKey(
+        @Body()
+        body: {
+            provider: string;
+            apiKey?: string;
+            baseURL?: string;
+            awsBearerToken?: string;
+            awsRegion?: string;
+        },
+    ): Promise<ModelResponse> {
+        const organizationId = this.request?.user?.organization?.uuid;
+        return await this.getModelsByProviderUseCase.execute(
+            body.provider,
+            organizationId ? { organizationId } : undefined,
+            {
+                apiKey: body.apiKey,
+                baseURL: body.baseURL,
+                awsBearerToken: body.awsBearerToken,
+                awsRegion: body.awsRegion,
+            },
+        );
+    }
+
+    @Get('/model-capabilities')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Read,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiOperation({
+        summary: 'Per-model UI capabilities',
+        description:
+            "Provider-owned hints for the connect form: whether a model accepts sampling params (Temperature) and whether it can reason (and at which levels). Read straight from the provider module in the registry — never hand-coded in the web — so a community-contributed provider change flows to the UI automatically. `model` is a plain model id (not a secret), so it travels in the query string.",
+    })
+    public async modelCapabilities(
+        @Query('provider') provider: string,
+        @Query('model') model: string,
+    ): Promise<ModelUiCapabilities> {
+        return this.getModelCapabilitiesUseCase.execute(provider, model ?? '');
+    }
+
+    @Delete('/delete-byok-config')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Delete,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiOperation({
+        summary: 'Delete a v2 BYOK model by id',
+        description:
+            'Delete a single v2 BYOK model by its stable id. The domain use-case runs the referential-integrity guard (routing + repo/folder overrides) and rejects an in-use model.',
+    })
+    @ApiQuery({
+        name: 'modelId',
+        required: true,
+        schema: { type: 'string' },
+    })
+    @ApiOkResponse({ type: ApiBooleanResponseDto })
+    public async deleteByokConfig(@Query('modelId') modelId: string) {
+        const organizationId = this.request?.user?.organization?.uuid;
+
+        if (!organizationId) {
+            throw new Error('Organization ID is missing from request');
+        }
+
+        // V5 input validation: reject an empty/whitespace modelId before the
+        // domain guard runs.
+        if (typeof modelId !== 'string' || modelId.trim().length === 0) {
+            throw new BadRequestException(
+                'modelId is required to delete a v2 BYOK model',
+            );
+        }
+
+        return await this.deleteByokConfigUseCase.execute(organizationId, {
+            modelId,
+        });
+    }
+
+    @Post('/test-byok')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Create,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiBody({
+        schema: {
+            type: 'object',
+            required: ['provider'],
+            properties: {
+                provider: { type: 'string' },
+                apiKey: { type: 'string' },
+                baseURL: { type: 'string' },
+                model: { type: 'string' },
+                temperature: { type: 'number' },
+                reasoningEffort: { type: 'string' },
+                reasoningConfigOverride: { type: 'string' },
+                maxOutputTokens: { type: 'number' },
+                openrouterProviderOrder: {
+                    type: 'array',
+                    items: { type: 'string' },
+                },
+                openrouterAllowFallbacks: { type: 'boolean' },
+                vertexLocation: { type: 'string' },
+                awsBearerToken: { type: 'string' },
+                awsAccessKeyId: { type: 'string' },
+                awsSecretAccessKey: { type: 'string' },
+                awsRegion: { type: 'string' },
+                awsSessionToken: { type: 'string' },
+            },
+        },
+    })
+    @ApiOperation({
+        summary: 'Test BYOK connection',
+        description:
+            'Probe the provider with the supplied credentials to verify they work. Issues the same minimal call a review would make, through the same model resolver, so the configured model, temperature and reasoning are all exercised — a config that would fail at review time fails here instead. Vertex and Bedrock validate their auth material first (GoogleAuth token exchange / STS GetCallerIdentity).',
+    })
+    public async testByokConnection(
+        @Body()
+        body: {
+            provider: string;
+            apiKey?: string;
+            baseURL?: string;
+            model?: string;
+            temperature?: number;
+            reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
+            reasoningConfigOverride?: string;
+            maxOutputTokens?: number;
+            openrouterProviderOrder?: string[];
+            openrouterAllowFallbacks?: boolean;
+            vertexLocation?: string;
+            awsBearerToken?: string;
+            awsAccessKeyId?: string;
+            awsSecretAccessKey?: string;
+            awsRegion?: string;
+            awsSessionToken?: string;
+        },
+    ): Promise<TestByokResult> {
+        return await this.testByokConnectionUseCase.execute(
+            body,
+            this.request?.user?.organization?.uuid,
+        );
+    }
+
+    @Post('/test-byok-model')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Create,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiBody({
+        schema: {
+            type: 'object',
+            required: ['provider', 'model'],
+            properties: {
+                provider: { type: 'string' },
+                model: { type: 'string' },
+                // Optional SAFE non-secret overrides (region/location) so an edit
+                // that changed them is probed as it will be saved. baseURL is not
+                // accepted: the stored secret must not be sent to a caller-supplied
+                // host (see TestByokModelUseCase).
+                awsRegion: { type: 'string' },
+                vertexLocation: { type: 'string' },
+            },
+        },
+    })
+    @ApiOperation({
+        summary: 'Test a BYOK model id',
+        description:
+            "Validate a model id against the org's SAVED BYOK provider (credentials resolved server-side). Surfaces the provider's real error (e.g. model-not-found) at config time instead of at review time.",
+    })
+    public async testByokModel(
+        @Body()
+        body: {
+            provider: string;
+            model: string;
+            awsRegion?: string;
+            vertexLocation?: string;
+        },
+    ): Promise<TestByokResult> {
+        const organizationId = this.request?.user?.organization?.uuid;
+        if (!organizationId) {
+            throw new BadRequestException(
+                'Organization ID is missing from request',
+            );
+        }
+        return await this.testByokModelUseCase.execute({
+            provider: body.provider,
+            model: body.model,
+            awsRegion: body.awsRegion,
+            vertexLocation: body.vertexLocation,
+            organizationAndTeamData: { organizationId },
+        });
+    }
+
+    @Get('/model-overrides')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Read,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiOperation({
+        summary: 'List per-repo/dir BYOK model overrides',
+        description:
+            "Enumerate every code-review byokModel override and flag which don't match the org's current main BYOK provider — powers the provider-change banner.",
+    })
+    public async listModelOverrides(
+        @Query('teamId') teamId?: string,
+    ): Promise<ListModelOverridesResult> {
+        const organizationId = this.request?.user?.organization?.uuid;
+        if (!organizationId) {
+            throw new BadRequestException(
+                'Organization ID is missing from request',
+            );
+        }
+        return await this.listModelOverridesUseCase.execute({
+            organizationId,
+            teamId,
+        });
+    }
+
+    @Post('/model-overrides/clear')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Create,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiBody({
+        schema: {
+            type: 'object',
+            required: ['targets'],
+            properties: {
+                teamId: { type: 'string' },
+                targets: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            repositoryId: { type: 'string' },
+                            directoryId: { type: 'string' },
+                        },
+                    },
+                },
+            },
+        },
+    })
+    @ApiOperation({
+        summary: 'Bulk-clear BYOK model overrides',
+        description:
+            'Reset byokModel to inherit ("") at the given repo/dir targets (no repositoryId = global). Only the byokModel field is touched.',
+    })
+    public async clearModelOverrides(
+        @Body()
+        body: {
+            teamId?: string;
+            targets?: Array<{ repositoryId?: string; directoryId?: string }>;
+        },
+    ): Promise<{ clearedCount: number }> {
+        const organizationId = this.request?.user?.organization?.uuid;
+        if (!organizationId) {
+            throw new BadRequestException(
+                'Organization ID is missing from request',
+            );
+        }
+        return await this.clearModelOverridesUseCase.execute(
+            { organizationId, teamId: body?.teamId },
+            body?.targets ?? [],
+        );
+    }
+
+    @Get('/llm-config/status')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        // Non-sensitive descriptor (never the API key). Code review settings
+        // editors need the BYOK provider/model to render the model selector,
+        // so allow either organization-settings or code-review-settings read.
+        checkAnyPermission([
+            {
+                action: Action.Read,
+                resource: ResourceType.OrganizationSettings,
+            },
+            {
+                action: Action.Read,
+                resource: ResourceType.CodeReviewSettings,
+            },
+        ]),
+    )
+    @ApiOperation({
+        summary: 'Get LLM provider configuration status',
+        description:
+            'Return which LLM configuration source is active (BYOK, env, or none) and a non-sensitive descriptor of each source. Never returns the API key itself.',
+    })
+    public async getLLMConfigStatus(): Promise<LLMConfigStatus> {
+        const organizationId = this.request?.user?.organization?.uuid;
+
+        if (!organizationId) {
+            throw new BadRequestException('Missing organizationId in request');
+        }
+
+        return await this.getLLMConfigStatusUseCase.execute({
+            organizationId,
+        });
+    }
+
+    @Get('/byok/providers')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        // Static, non-sensitive descriptor of the connectable BYOK providers
+        // (registry-driven; never a secret). Same read gate as
+        // /llm-config/status: code-review settings editors need the provider
+        // LIST to render the connect picker, so allow either
+        // organization-settings or code-review-settings read.
+        checkAnyPermission([
+            {
+                action: Action.Read,
+                resource: ResourceType.OrganizationSettings,
+            },
+            {
+                action: Action.Read,
+                resource: ResourceType.CodeReviewSettings,
+            },
+        ]),
+    )
+    @ApiOperation({
+        summary: 'List connectable BYOK providers',
+        description:
+            'Return the registry-driven list of connectable BYOK providers (id, label, aliases). Static and non-sensitive — never returns any credential.',
+    })
+    public async getByokProviders(): Promise<ByokProvidersResult> {
+        return await this.getByokProvidersUseCase.execute(
+            this.request?.user?.organization?.uuid,
+        );
+    }
+
+
+    @Get('/cockpit-metrics-visibility')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Read,
+            resource: ResourceType.Cockpit,
+        }),
+    )
+    @ApiOperation({
+        summary: 'Get cockpit metrics visibility',
+        description: 'Return cockpit metrics visibility configuration.',
+    })
+    @ApiOkResponse({ type: OrganizationMetricsVisibilityResponseDto })
+    public async getCockpitMetricsVisibility(): Promise<ICockpitMetricsVisibility> {
+        const organizationId = this.request?.user?.organization?.uuid;
+
+        if (!organizationId) {
+            throw new Error('Organization ID is missing from request');
+        }
+
+        return await this.getCockpitMetricsVisibilityUseCase.execute({
+            organizationId,
+        });
+    }
+
+    @Post('/cockpit-metrics-visibility')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Update,
+            resource: ResourceType.Cockpit,
+        }),
+    )
+    @ApiOperation({
+        summary: 'Update cockpit metrics visibility',
+        description: 'Persist cockpit metrics visibility configuration.',
+    })
+    @ApiCreatedResponse({ type: OrganizationParameterStoredResponseDto })
+    public async updateCockpitMetricsVisibility(
+        @Body()
+        body: {
+            teamId?: string;
+            config: ICockpitMetricsVisibility;
+        },
+    ) {
+        const organizationId = this.request?.user?.organization?.uuid;
+
+        if (!organizationId) {
+            throw new Error('Organization ID is missing from request');
+        }
+
+        return await this.createOrUpdateOrganizationParametersUseCase.execute(
+            OrganizationParametersKey.COCKPIT_METRICS_VISIBILITY,
+            body.config,
+            {
+                organizationId,
+                teamId: body.teamId,
+            },
+        );
+    }
+
+    @Post('/ignore-bots')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Update,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiOperation({
+        summary: 'Ignore bot users',
+        description: 'Mark bot users to be ignored in auto-licensing.',
+    })
+    @ApiNoContentResponse({ description: 'Bots ignored successfully' })
+    public async ignoreBots(
+        @Body()
+        body: {
+            teamId: string;
+        },
+    ) {
+        const organizationId = this.request?.user?.organization?.uuid;
+
+        if (!organizationId) {
+            throw new BadRequestException('Missing organizationId in request');
+        }
+
+        return await this.ignoreBotsUseCase.execute({
+            organizationId,
+            teamId: body.teamId,
+        });
+    }
+
+    @Post('/auto-license/allowed-users')
+    @UseGuards(PolicyGuard)
+    @CheckPolicies(
+        checkPermissions({
+            action: Action.Update,
+            resource: ResourceType.OrganizationSettings,
+        }),
+    )
+    @ApiOperation({
+        summary: 'Update auto-license allowed users',
+        description:
+            'Ensure allowed users include the current user when requested.',
+    })
+    @ApiCreatedResponse({ type: ApiBooleanResponseDto })
+    public async updateAutoLicenseAllowedUsers(
+        @Body()
+        body: {
+            teamId?: string;
+            includeCurrentUser?: boolean;
+            organizationId?: string;
+        },
+    ) {
+        const organizationId =
+            body.organizationId || this.request?.user?.organization?.uuid;
+
+        if (!organizationId) {
+            throw new BadRequestException('Missing organizationId in request');
+        }
+
+        return await this.updateAutoLicenseAllowedUsersUseCase.execute({
+            organizationAndTeamData: {
+                organizationId,
+                teamId: body.teamId,
+            },
+            includeCurrentUser: body.includeCurrentUser,
+        });
+    }
+}

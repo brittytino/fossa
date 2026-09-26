@@ -1,0 +1,117 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { filterReviewFiles } from '../review-file-filter.js';
+
+describe('filterReviewFiles', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('does not print skip warnings when quiet is enabled', () => {
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        const oversizedDiff = 'x'.repeat(1024 * 1024 + 1);
+
+        const result = filterReviewFiles(
+            [
+                {
+                    path: 'big.ts',
+                    content: 'const ok = true;',
+                    status: 'modified',
+                    diff: oversizedDiff,
+                },
+            ],
+            true,
+        );
+
+        expect(result).toHaveLength(0);
+        expect(logSpy).not.toHaveBeenCalled();
+    });
+
+    it('prints skip warnings when quiet is disabled', () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const oversizedDiff = 'x'.repeat(1024 * 1024 + 1);
+
+        const result = filterReviewFiles(
+            [
+                {
+                    path: 'big.ts',
+                    content: 'const ok = true;',
+                    status: 'modified',
+                    diff: oversizedDiff,
+                },
+            ],
+            false,
+        );
+
+        expect(result).toHaveLength(0);
+        expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('keeps files within the API diff limit and skips those above it', () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        const result = filterReviewFiles(
+            [
+                {
+                    path: 'ok.ts',
+                    content: 'const ok = true;',
+                    status: 'modified',
+                    diff: 'x'.repeat(500_000 - 1),
+                },
+                {
+                    path: 'too-big.ts',
+                    content: 'const ok = true;',
+                    status: 'modified',
+                    diff: 'x'.repeat(500_000 + 1),
+                },
+            ],
+            false,
+        );
+
+        expect(result.map((file) => file.path)).toEqual(['ok.ts']);
+        expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('counts characters, not UTF-8 bytes, to match the API DTO limits', () => {
+        // The DTO caps by string length (@MaxLength), so a non-ASCII diff of
+        // 400K chars (800K UTF-8 bytes) is under the 500K-char limit and must
+        // be kept. A byte-based filter would wrongly drop it.
+        const result = filterReviewFiles(
+            [
+                {
+                    path: 'non-ascii.ts',
+                    content: 'c',
+                    status: 'modified',
+                    diff: 'é'.repeat(400_000),
+                },
+            ],
+            true,
+        );
+
+        expect(result.map((file) => file.path)).toEqual(['non-ascii.ts']);
+    });
+
+    it('keeps files within the API content limit and skips those above it', () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        const result = filterReviewFiles(
+            [
+                {
+                    path: 'ok.ts',
+                    content: 'x'.repeat(2_000_000 - 1),
+                    status: 'modified',
+                    diff: '+1',
+                },
+                {
+                    path: 'too-big.ts',
+                    content: 'x'.repeat(2_000_000 + 1),
+                    status: 'modified',
+                    diff: '+1',
+                },
+            ],
+            false,
+        );
+
+        expect(result.map((file) => file.path)).toEqual(['ok.ts']);
+        expect(warnSpy).toHaveBeenCalled();
+    });
+});

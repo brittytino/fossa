@@ -1,3 +1,9 @@
+/* Fossa Premium Dark Black & Gold/Orange */
+html.dark, body.dark, [data-theme="dark"] {
+    --background: #000000 !important;
+    background-color: #000000 !important;
+}
+
 #content-area:has(.fossa-changelog-release) #header .eyebrow {
     display: none;
 }
@@ -42,19 +48,19 @@ body:has(.fossa-changelog-release) header a[href*="changelog"]::after {
     bottom: -1px;
     left: 0;
     height: 2px;
-    background: #6366f1;
+    background: #F59E0B;
 }
 
 body:has(.fossa-changelog-release) header a[href*="changelog"]:hover,
 header a[href*="changelog"]:hover {
-    color: #818cf8 !important;
+    color: #FBBF24 !important;
 }
 
 body:has(.fossa-changelog-release) header a[href*="changelog"]:hover *,
 body:has(.fossa-changelog-release) header a[href*="changelog"]:hover svg,
 header a[href*="changelog"]:hover *,
 header a[href*="changelog"]:hover svg {
-    color: #818cf8 !important;
+    color: #FBBF24 !important;
     stroke: currentColor;
 }
 
@@ -65,7 +71,7 @@ header a[href*="changelog"]:hover svg {
     align-items: start;
     margin-top: 2.5rem;
     padding-top: 2rem;
-    border-top: 1px solid rgba(99, 102, 241, 0.2);
+    border-top: 1px solid rgba(245, 158, 11, 0.2);
 }
 
 .fossa-changelog-release[hidden] {
@@ -174,27 +180,27 @@ header a[href*="changelog"]:hover svg {
 }
 
 .fossa-changelog-filter-button:hover .fossa-changelog-filter-control:not(:checked) {
-    background: rgba(99, 102, 241, 0.14);
+    background: rgba(245, 158, 11, 0.14);
 }
 
 .fossa-changelog-filter-button:hover span {
-    color: #818cf8;
+    color: #FBBF24;
 }
 
 .fossa-changelog-filter-button.is-selected,
 .fossa-changelog-filter-button:has(.fossa-changelog-filter-control:checked) {
-    border-color: rgba(99, 102, 241, 0.35) !important;
-    background: rgba(99, 102, 241, 0.2) !important;
-    color: #818cf8 !important;
+    border-color: rgba(245, 158, 11, 0.35) !important;
+    background: rgba(245, 158, 11, 0.2) !important;
+    color: #FBBF24 !important;
 }
 
 .fossa-changelog-filter-control:checked {
-    border-color: rgba(99, 102, 241, 0.35) !important;
-    background: rgba(99, 102, 241, 0.2) !important;
+    border-color: rgba(245, 158, 11, 0.35) !important;
+    background: rgba(245, 158, 11, 0.2) !important;
 }
 
 .fossa-changelog-filter-control:checked + span {
-    color: #818cf8 !important;
+    color: #FBBF24 !important;
 }
 
 .fossa-changelog-shell:has(.fossa-changelog-filter-control:checked) .fossa-changelog-filterable,
@@ -262,13 +268,13 @@ header a[href*="changelog"]:hover svg {
 .fossa-changelog-section + .fossa-changelog-section {
     margin-top: 3rem;
     padding-top: 2rem;
-    border-top: 1px solid rgba(99, 102, 241, 0.18);
+    border-top: 1px solid rgba(245, 158, 11, 0.18);
 }
 
 .fossa-changelog-section-label {
     display: block;
     margin: 0 0 2rem;
-    color: #818cf8;
+    color: #FBBF24;
     font: inherit;
     font-size: 1em;
     font-weight: 700;
@@ -300,17 +306,17 @@ header a[href*="changelog"]:hover svg {
 }
 
 .fossa-changelog-link {
-    color: #818cf8;
+    color: #FBBF24;
     font-weight: 700;
     text-decoration: underline;
-    text-decoration-color: rgba(129, 140, 248, 0.6);
+    text-decoration-color: rgba(245, 158, 11, 0.5);
     text-underline-offset: 0.2em;
 }
 
 .fossa-changelog-code {
     border-radius: 0.35rem;
-    background: rgba(99, 102, 241, 0.2);
-    color: #818cf8;
+    background: rgba(245, 158, 11, 0.2);
+    color: #FBBF24;
     padding: 0.1rem 0.35rem;
     font-size: 0.9em;
 }
@@ -319,7 +325,7 @@ header a[href*="changelog"]:hover svg {
     display: block;
     width: 100%;
     margin: 1.25rem 0 0;
-    border: 1px solid rgba(99, 102, 241, 0.35);
+    border: 1px solid rgba(245, 158, 11, 0.35);
     border-radius: 8px;
     background: rgba(0, 0, 0, 0.25);
 }

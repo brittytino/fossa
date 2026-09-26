@@ -1,9 +1,5 @@
-import { Metadata } from "next";
-import Page from "src/features/subscription/choose-plan/page";
+import { redirect } from "next/navigation";
 
-export default Page;
-
-export const metadata: Metadata = {
-    title: "Choose Plan",
-    openGraph: { title: "Choose Plan" },
-};
+export default function ChoosePlanPage() {
+    redirect("/");
+}

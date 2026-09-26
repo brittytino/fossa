@@ -1,17 +1,17 @@
 <svg width="130" height="36" viewBox="0 0 130 36" fill="none" xmlns="http://www.w3.org/2000/svg">
     <defs>
-        <linearGradient id="fossa-dark-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#38BDF8" />
-            <stop offset="50%" stop-color="#6366F1" />
-            <stop offset="100%" stop-color="#EC4899" />
+        <linearGradient id="fossa-dark-gold-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#FDE047" />
+            <stop offset="50%" stop-color="#F59E0B" />
+            <stop offset="100%" stop-color="#EA580C" />
         </linearGradient>
-        <filter id="fossa-dark-glow" x="-4" y="-4" width="40" height="40" filterUnits="userSpaceOnUse">
+        <filter id="fossa-gold-glow" x="-4" y="-4" width="40" height="40" filterUnits="userSpaceOnUse">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feComposite in="SourceGraphic" in2="blur" operator="over" />
         </filter>
     </defs>
 
-    <!-- FOSSA Shield Badge -->
+    <!-- FOSSA Shield Badge (Golden Sunburst / Orange) -->
     <g transform="translate(2, 2)">
         <rect
             x="0"
@@ -19,7 +19,7 @@
             width="32"
             height="32"
             rx="8"
-            fill="url(#fossa-dark-grad)"
+            fill="url(#fossa-dark-gold-grad)"
         />
         <!-- Inner dynamic 'F' glyph -->
         <path

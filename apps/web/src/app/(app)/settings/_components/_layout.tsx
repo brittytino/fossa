@@ -255,12 +255,6 @@ function SettingsLayoutShell({
             });
         }
 
-        if (canReadBilling) {
-            nextRoutes.push({
-                label: "Subscription",
-                href: "/settings/subscription",
-            });
-        }
 
         if (canReadPlugins && isMCPAvailable) {
             nextRoutes.push({

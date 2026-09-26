@@ -1,163 +1,87 @@
 ---
-title: "Pricing Deep Dive"
-description: "How Fossa pricing works — Community, Teams, and Enterprise, what the free trial includes, and why reviews are unlimited on every plan."
+title: "100% Free & Self-Hosted"
+description: "FOSSA is completely free, 100% open-source under AGPL-3.0, and self-hosted with no paid tiers, subscriptions, or selling."
 ---
 
-Everything you need to choose the right plan. FOSSA is 100% open source under AGPL-3.0 and free for self-hosting.
+FOSSA is completely free, open-source software. There are **no paid plans**, **no Teams subscriptions**, **no enterprise paywalls**, and **no selling**. Every feature is unlocked and available to every developer and team forever.
 
 <Note>
-  **Reviews are unlimited on every plan** — they run on your own AI key (BYOK).
-  Plans differ by **features**, not by how many PRs Fossy can review. Every plan
-  includes unlimited users and unlimited pull requests, with no per-seat minimum.
+  **Zero platform fees, zero license keys.** FOSSA runs entirely on your own infrastructure via Docker. You only connect your own API key (BYOK) for whichever LLM provider you choose to use.
 </Note>
 
-## Plans at a glance
+## Everything is Included
 
-<CardGroup cols={3}>
-  <Card title="Community" icon="github">
-    **Free, forever.** BYOK. Self-hosted or cloud.
-
-    For indie devs, students, OSS maintainers, and small teams.
-  </Card>
-  <Card title="Teams" icon="users">
-    **$10/dev/month** + token costs (BYOK). Cloud only.
-
-    14-day free trial, no credit card. 20% off annually.
-  </Card>
-  <Card title="Enterprise" icon="building">
-    **Custom pricing.** Self-hosted or cloud.
-
-    Hardened security, governance, and hands-on onboarding.
-  </Card>
-</CardGroup>
-
-## The free trial (Teams)
-
-A Teams trial runs on **two separate, independent clocks** — the 14 days govern Team **features**, never your ability to review PRs:
+Every capability in FOSSA is 100% free and unlimited:
 
 <CardGroup cols={2}>
-  <Card title="14 days of Team features" icon="calendar">
-    Cockpit, unlimited Fossy Rules and plugins, priority queue, and more.
+  <Card title="Unlimited Autonomous Reviews" icon="robot">
+    Fossy inspects diffs, analyzes logic, and posts actionable inline comments across all your repositories with no PR quotas or monthly caps.
   </Card>
-  <Card title="Your first 5 PR reviews on us" icon="gift">
-    We cover the AI tokens, so you can try Fossy with **zero setup — no API key
-    needed.** (Earn a few more by completing onboarding steps.)
+  <Card title="Unlimited Team Members" icon="users">
+    No per-seat pricing or user limits. Add your entire engineering team and assign organization roles without restrictions.
   </Card>
-</CardGroup>
-
-**To keep reviewing past the 5 trial reviews — or to go unlimited right away — [connect your AI key](/en/how_to_use/byok).** Reviews then run on your key: unlimited, on any plan, even after the 14 days end. Trial reviews run on a model Fossa picks for you; with your own key you can run frontier models for the best quality.
-
-If trial reviews run out before you connect a key, Fossy pauses reviews and posts a comment with a one-click link to add your key.
-
-## What's included
-
-| Feature | Community | Teams | Enterprise |
-| --- | --- | --- | --- |
-| **Price** | Free | $10/dev/mo | Custom |
-| **Deployment** | Self-hosted or cloud | Cloud | Self-hosted or cloud |
-| **Code reviews** | Unlimited | Unlimited | Unlimited |
-| **Users** | Unlimited | Unlimited | Unlimited |
-| **Fossy Rules** | Up to 10 | Unlimited | Unlimited |
-| **Plugins / MCPs** | Up to 3 | Unlimited | Unlimited |
-| **Quality Radar issues** | Unlimited | Unlimited | Unlimited |
-| **Fossy Memory** | ✓ | ✓ | ✓ |
-| **Priority queue** | — | ✓ | ✓ |
-| **Fossa Cockpit (metrics)** | — | ✓ | ✓ |
-| **SSO / SAML** | — | — | ✓ |
-| **RBAC + audit logs** | — | — | ✓ |
-| **SOC 2 compliant** | — | — | ✓ |
-| **Dedicated instance & SLAs** | — | — | ✓ |
-| **Support** | Discord | Email + Discord | Private Discord + up to 5h/mo dedicated |
-
-## How pricing works
-
-<CardGroup cols={2}>
-  <Card title="Pay per active developer" icon="user-check">
-    Only developers who open PRs count toward a seat. No minimums, no seat
-    lock-in.
+  <Card title="Unlimited Fossy Rules" icon="list-check">
+    Define custom coding rules, team conventions, and review directives globally, per repository, or per directory with full inheritance.
   </Card>
-  <Card title="Adjust anytime" icon="sliders">
-    Change your active-developer count in account settings whenever your team
-    changes.
+  <Card title="Cockpit Analytics Hub" icon="chart-mixed">
+    Full access to developer turnaround time, PR cycle time, lead time breakdown, and code health telemetry out of the box.
+  </Card>
+  <Card title="Universal Git Providers" icon="code-branch">
+    First-party integration for GitHub, GitLab, Bitbucket, Azure Repos, and Forgejo with zero extra configuration or add-on costs.
+  </Card>
+  <Card title="Fossa Terminal CLI" icon="terminal">
+    Run automated pre-commit checks, review uncommitted diffs, and inspect rules directly from your terminal (`fossa review`).
   </Card>
 </CardGroup>
 
-## BYOK: the default across all plans
+## True BYOK (Bring Your Own Key)
 
-Fossa does **not** sell LLM tokens by default. Community, Teams, and Enterprise all run on **Bring Your Own Key** — you connect your own provider (OpenAI, Anthropic, Gemini, or any OpenAI-compatible), and tokens are billed directly by that provider. Fossa never marks up tokens.
+FOSSA does **not** sell LLM tokens or charge markups. FOSSA is pure open-source software that communicates directly with your chosen AI provider using your own credentials:
 
-| Plan | What you pay Fossa | Tokens |
-| --- | --- | --- |
-| **Community** | $0 | You pay your provider (BYOK) |
-| **Teams** | $10/active dev/mo | You pay your provider (BYOK) |
-| **Enterprise** | Custom | You pay your provider (BYOK) |
+| What you pay FOSSA | What you pay your AI Provider |
+| :--- | :--- |
+| **$0.00 (Free forever)** | You pay your provider directly at their standard API rates (Anthropic, OpenAI, Google Gemini, OpenRouter, or $0 for local models via Ollama/vLLM) |
 
-See the [BYOK overview](/en/how_to_use/byok) for supported providers and setup.
+- **No Markups:** FOSSA never adds margins or hidden fees on top of model API calls.
+- **Data Sovereignty:** Your code and prompts travel directly between your self-hosted instance and your chosen model provider. No 3rd-party SaaS intercepts your source code.
+- **Model Flexibility:** Switch between frontier models (Claude 3.7 Sonnet, GPT-4o) and cost-efficient models (Gemini 2.5 Flash, DeepSeek R1) per repository at any time.
 
-## Teams pricing — $10/active dev/month
+See the [BYOK Setup Guide](/en/how_to_use/byok) for step-by-step instructions on connecting providers.
 
-In addition to your provider's token cost (no Fossa markup).
+## Feature Breakdown
 
-<CardGroup cols={2}>
-  <Card title="What the $10/dev covers" icon="box">
-    - Managed cloud hosting + automatic updates
-    - Priority queue for Fossy Agents
-    - Fossa Cockpit (engineering metrics)
-    - Unlimited Fossy Rules & plugins/MCPs
-    - Email + Discord support
-  </Card>
-  <Card title="What tokens cover" icon="coins">
-    - Every LLM call Fossy makes during a review
-    - Billed by your provider; switch anytime
-    - You pick the model — cost-effective (Gemini Flash, GPT-5-mini) or frontier (Claude 4.5 Sonnet, GPT-5)
-  </Card>
-</CardGroup>
+| Feature | FOSSA (Self-Hosted) |
+| :--- | :--- |
+| **License** | **AGPL-3.0 (100% Open Source)** |
+| **Cost** | **$0 / Free Forever** |
+| **Pull Request Reviews** | **Unlimited** |
+| **Team Members & Users** | **Unlimited** |
+| **Repositories** | **Unlimited** |
+| **Fossy Custom Rules** | **Unlimited** |
+| **Cockpit Engineering Metrics** | **Included** |
+| **Fossa CLI** | **Included** |
+| **Git Provider Webhooks** | **Included (GitHub, GitLab, Bitbucket, Azure, Forgejo)** |
+| **Multi-Provider Fallback Failover** | **Included** |
+| **Self-Hosted Deployment** | **Docker Compose / Kubernetes / Helm** |
 
-**Billing:** monthly, or **20% off** annually · 14-day free trial, no card · cancel anytime (effective end of cycle).
+## Self-Hosting Quickstart
 
-## Enterprise pricing
+Run the complete platform locally or on your own server in minutes:
 
-Custom-priced via contract. Like every plan, Enterprise is **BYOK** — Fossa bills only the per-seat fee and you pay your LLM provider directly.
+```bash
+# Clone the repository
+git clone https://github.com/brittytino/fossa.git
+cd fossa
 
-Enterprise adds SSO / SAML, RBAC with audit logs and analytics, a dedicated instance, custom SLAs, up to **5 hours/month** of dedicated support, and a private Discord channel. Fossa is **SOC 2 compliant**.
+# Copy environment config
+cp .env.example .env
 
-[Contact sales](https://github.com/brittytino/fossa/pricing) for a quote tailored to your organization.
+# Start with Docker Compose
+pnpm run docker:start
+```
 
-## Unlimited pull requests
-
-No PR limit on any plan. The only hard limit: we don't review PRs with more than **2,000 changed files**. Git-provider-side rate limits may also apply.
-
-## Fossy Pilot Program
-
-We subsidize Fossa with **30–100% discounts** for teams that move the industry forward or couldn't otherwise afford it:
-
-- Early-stage startups
-- Open-source projects with active development
-- Teams in economically disadvantaged regions
-- Non-profit organizations
-
-<Steps>
-  <Step title="Join our Discord">
-    Hop into the [community](https://discord.gg/TFZBRk9fT6).
-  </Step>
-  <Step title="Tell us about you">
-    Share your org name, website, and a brief description of your work.
-  </Step>
-  <Step title="Show eligibility">
-    Startup stage/funding, OSS repo links, region context, or proof of
-    non-profit status.
-  </Step>
-  <Step title="Hear back in 3 business days">
-    We review your application and follow up.
-  </Step>
-</Steps>
-
-## Payments & billing
-
-- **Powered by Stripe** — secure, globally trusted payment processing.
-- **Cancel anytime** — changes take effect at the end of your billing cycle.
-- **Invoices & Nota Fiscal** — for Brazilian customers 🇧🇷, we provide invoices and issue a Nota Fiscal for every transaction.
+Once running, the web dashboard is accessible at `http://localhost:3000` with all features unlocked.
 
 ---
 
-Questions or need custom enterprise guidance? Join our [GitHub Community](https://github.com/brittytino/fossa/discussions) or open an issue on [GitHub](https://github.com/brittytino/fossa/issues).
+Have questions or need assistance? Join the conversation on [GitHub Discussions](https://github.com/brittytino/fossa/discussions) or report issues on [GitHub](https://github.com/brittytino/fossa/issues).

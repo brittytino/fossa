@@ -4,6 +4,7 @@ import { Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Button } from "@components/ui/button";
 import { Card } from "@components/ui/card";
+import { Heading } from "@components/ui/heading";
 import { Input } from "@components/ui/input";
 import { magicModal } from "@components/ui/magic-modal";
 import { Page } from "@components/ui/page";
@@ -48,12 +49,28 @@ export default function SubscriptionLayout({
     const isUnlicensedSelfHosted =
         isSelfHosted && subscription.status === "self-hosted";
 
-    // Unlicensed self-hosted: show only the license key input
-    if (isUnlicensedSelfHosted)
+    // Self-hosted: completely free and open-source, no license key or selling needed
+    if (isSelfHosted)
         return (
             <Page.Root>
                 <Page.Content>
-                    <LicenseKeySettings />
+                    <Card
+                        color="lv1"
+                        className="mx-auto flex max-w-2xl flex-col items-center gap-4 p-8 text-center">
+                        <Heading variant="h2">100% Free &amp; Open Source</Heading>
+                        <p className="text-text-secondary text-sm">
+                            FOSSA is completely free, self-hosted, and open-source under AGPL-3.0.
+                            There are no paid plans, subscriptions, or license keys required.
+                            Every feature is fully unlocked for your organization.
+                        </p>
+                        <div className="pt-2">
+                            <Button
+                                variant="primary"
+                                onClick={() => (window.location.href = "/byok")}>
+                                Manage AI Models &amp; BYOK
+                            </Button>
+                        </div>
+                    </Card>
                 </Page.Content>
             </Page.Root>
         );

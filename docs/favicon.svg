@@ -1,23 +1,23 @@
 <svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
     <defs>
-        <linearGradient id="fossa-fav-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#38BDF8" />
-            <stop offset="50%" stop-color="#6366F1" />
-            <stop offset="100%" stop-color="#EC4899" />
+        <linearGradient id="fossa-fav-gold-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#FDE047" />
+            <stop offset="50%" stop-color="#F59E0B" />
+            <stop offset="100%" stop-color="#EA580C" />
         </linearGradient>
-        <filter id="fossa-fav-shadow" x="0" y="8" width="256" height="248" filterUnits="userSpaceOnUse">
-            <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#6366F1" flood-opacity="0.35" />
+        <filter id="fossa-fav-gold-shadow" x="0" y="8" width="256" height="248" filterUnits="userSpaceOnUse">
+            <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#F59E0B" flood-opacity="0.4" />
         </filter>
     </defs>
 
-    <g filter="url(#fossa-fav-shadow)">
+    <g filter="url(#fossa-fav-gold-shadow)">
         <rect
             x="16"
             y="16"
             width="224"
             height="224"
             rx="52"
-            fill="url(#fossa-fav-grad)"
+            fill="url(#fossa-fav-gold-grad)"
         />
         <g transform="translate(16, 16) scale(7)">
             <path

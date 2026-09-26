@@ -3,13 +3,13 @@
     "theme": "aspen",
     "name": "Fossa",
     "colors": {
-        "primary": "#6366F1",
-        "light": "#4F46E5",
-        "dark": "#818CF8"
+        "primary": "#F59E0B",
+        "light": "#D97706",
+        "dark": "#FBBF24"
     },
     "background": {
         "color": {
-            "dark": "#090D16"
+            "dark": "#000000"
         }
     },
     "favicon": "/favicon.svg",
@@ -38,7 +38,7 @@
                                 ]
                             },
                             {
-                                "group": "Billing & Licenses",
+                                "group": "Open Source & BYOK",
                                 "pages": [
                                     "en/how_to_use/pricing",
                                     "en/how_to_use/byok",

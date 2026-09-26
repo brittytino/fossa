@@ -1,13 +1,13 @@
 <svg width="130" height="36" viewBox="0 0 130 36" fill="none" xmlns="http://www.w3.org/2000/svg">
     <defs>
-        <linearGradient id="fossa-light-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#0284C7" />
-            <stop offset="50%" stop-color="#4F46E5" />
-            <stop offset="100%" stop-color="#DB2777" />
+        <linearGradient id="fossa-light-gold-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#F59E0B" />
+            <stop offset="50%" stop-color="#EA580C" />
+            <stop offset="100%" stop-color="#C2410C" />
         </linearGradient>
     </defs>
 
-    <!-- FOSSA Shield Badge -->
+    <!-- FOSSA Shield Badge (Rich Amber / Orange) -->
     <g transform="translate(2, 2)">
         <rect
             x="0"
@@ -15,7 +15,7 @@
             width="32"
             height="32"
             rx="8"
-            fill="url(#fossa-light-grad)"
+            fill="url(#fossa-light-gold-grad)"
         />
         <!-- Inner dynamic 'F' glyph -->
         <path
@@ -30,7 +30,7 @@
     <text
         x="44"
         y="24"
-        fill="#0F172A"
+        fill="#1C1917"
         font-family="Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
         font-size="20"
         font-weight="800"

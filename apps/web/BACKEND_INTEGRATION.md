@@ -1,49 +1,48 @@
-# Integração Backend - Conversão de Tiptap JSON para Texto
+# Backend Integration - Converting Tiptap JSON to Text
 
-## Contexto
+## Context
 
-O editor de prompts salva o conteúdo como **JSON do Tiptap** para preservar formatação e menções MCP (`@mcp<app|tool>`).
+The prompt editor saves content as **Tiptap JSON** to preserve rich text formatting and MCP mentions (`@mcp<app|tool>`).
 
-Quando você for **enviar o prompt para o LLM**, precisa converter o JSON para **texto puro**.
+When **sending prompts to the LLM**, this JSON structure must be converted to **plain text**.
 
-## Solução
+## Solution
 
-### 1. Copiar a função utilitária
+### 1. Copy the Utility Function
 
-Copie o arquivo `src/core/utils/tiptap-json-to-text.ts` para seu backend. A função é **pura JavaScript/TypeScript**, sem dependências do React ou Tiptap.
+Use `src/core/utils/tiptap-json-to-text.ts` in your backend or service. The function is **pure JavaScript/TypeScript** without dependencies on React or Tiptap.
 
-### 2. Uso no Backend
+### 2. Backend Usage
 
 ```typescript
 import { convertTiptapJSONToText } from "./utils/tiptap-json-to-text";
 
-// Quando receber o prompt do banco de dados (vem como JSON string):
+// When receiving the prompt from the database (as a JSON string):
 const promptFromDB =
     '{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Analyze "},{"type":"mcpMention","attrs":{"app":"fossa","tool":"fossa_list_commits"}},{"type":"text","text":" for bugs"}]}]}';
 
-// Converter para texto antes de enviar ao LLM:
+// Convert to text before dispatching to the LLM:
 const promptText = convertTiptapJSONToText(promptFromDB);
-// Resultado: "Analyze @mcp<fossa|fossa_list_commits> for bugs"
+// Result: "Analyze @mcp<fossa|fossa_list_commits> for bugs"
 
-// Agora pode enviar promptText para o LLM
+// Now send promptText to the LLM
 sendToLLM(promptText);
 ```
 
-### 3. Onde aplicar a conversão
+### 3. Where to Apply Conversion
 
-Aplique a conversão **ANTES de enviar para o LLM**:
+Apply conversion **BEFORE sending to the LLM**:
 
-- **Campos de prompt que usam o RichTextEditor:**
+- **Prompt fields that utilize the RichTextEditor:**
     - `v2PromptOverrides.generation.main.value`
     - `v2PromptOverrides.categories.descriptions.*.value`
     - `v2PromptOverrides.severity.flags.*.value`
 
-### 4. Exemplo prático
+### 4. Practical Example
 
 ```typescript
-// Exemplo: Endpoint que processa code review
+// Example: Service executing code review
 async function processCodeReview(config: CodeReviewConfig) {
-    // Converter prompts antes de usar
     const mainPrompt = convertTiptapJSONToText(
         config.v2PromptOverrides?.generation?.main?.value,
     );
@@ -52,7 +51,6 @@ async function processCodeReview(config: CodeReviewConfig) {
         config.v2PromptOverrides?.categories?.descriptions?.bug?.value,
     );
 
-    // Agora pode construir o prompt final para o LLM
     const fullPrompt = `
     ${mainPrompt}
     
@@ -64,76 +62,30 @@ async function processCodeReview(config: CodeReviewConfig) {
 }
 ```
 
-### 5. Compatibilidade
+### 5. Compatibility
 
-A função funciona com:
+The function handles:
 
 - ✅ JSON string: `'{"type":"doc",...}'`
 - ✅ JSON object: `{ type: "doc", ... }`
-- ✅ Texto puro: `"hello world"` (retorna como está)
-- ✅ Null/undefined: retorna `""`
+- ✅ Plain text: `"hello world"` (returns as-is)
+- ✅ Null/undefined: returns `""`
 
-### 6. Formato dos tokens MCP
+### 6. MCP Token Format
 
-Os tokens são preservados no formato:
+Tokens are preserved in the format:
 
 ```
 @mcp<app_name|tool_name>
 ```
 
-Exemplo:
-
+Examples:
 - `@mcp<fossa|fossa_list_commits>`
 - `@mcp<jira|search_issues>`
 
-## Implementação Backend (JavaScript/TypeScript puro)
+## Notes
 
-Se preferir, você pode usar esta versão simplificada no backend:
-
-```typescript
-function convertTiptapJSONToText(
-    content: string | object | null | undefined,
-): string {
-    if (!content) return "";
-
-    if (typeof content === "string") {
-        if (content.startsWith("{") && content.trim().startsWith("{")) {
-            try {
-                return convertTiptapJSONToText(JSON.parse(content));
-            } catch {
-                return content;
-            }
-        }
-        return content;
-    }
-
-    if (typeof content === "object" && content !== null) {
-        try {
-            let text = "";
-            function traverse(node: any): void {
-                if (!node || typeof node !== "object") return;
-                if (node.type === "text") {
-                    text += node.text || "";
-                } else if (node.type === "mcpMention") {
-                    text += `@mcp<${node.attrs?.app || ""}|${node.attrs?.tool || ""}>`;
-                } else if (node.content && Array.isArray(node.content)) {
-                    node.content.forEach(traverse);
-                }
-            }
-            traverse(content);
-            return text;
-        } catch {
-            return "";
-        }
-    }
-
-    return "";
-}
-```
-
-## Notas
-
-- ⚠️ **NÃO** envie o JSON diretamente para o LLM
-- ✅ **SEMPRE** converta usando `convertTiptapJSONToText()` antes de enviar
-- ✅ Os tokens `@mcp<app|tool>` são preservados no texto final
-- ✅ A função é idempotente (pode chamar várias vezes sem problema)
+- ⚠️ **DO NOT** send raw JSON directly to the LLM.
+- ✅ **ALWAYS** convert using `convertTiptapJSONToText()` first.
+- ✅ `@mcp<app|tool>` tokens are preserved in the resulting text.
+- ✅ The function is idempotent.

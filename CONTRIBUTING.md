@@ -1,180 +1,169 @@
-# Contributing to Fossa
+# Contributing to FOSSA
 
-Thank you for your interest in contributing to Fossa! This document provides guidelines and instructions for contributing to our project.
+Thank you for taking the time to contribute! FOSSA is a free, open-source, self-hosted AI code review platform, and every pull request, bug report, and doc improvement helps.
 
 ## Table of Contents
-- [Prerequisites](#prerequisites)
-- [Setting Up Development Environment](#setting-up-development-environment)
-- [Project Structure](#project-structure)
-- [Code Conventions](#code-conventions)
-- [Contribution Process](#contribution-process)
-- [Testing](#testing)
-- [Documentation](#documentation)
-- [Commit Guidelines](#commit-guidelines)
+
 - [Code of Conduct](#code-of-conduct)
+- [How to Report a Bug](#how-to-report-a-bug)
+- [How to Request a Feature](#how-to-request-a-feature)
+- [Development Setup](#development-setup)
+- [Making a Pull Request](#making-a-pull-request)
+- [Coding Standards](#coding-standards)
+- [Commit Message Format](#commit-message-format)
+- [Running Tests](#running-tests)
 
-## Prerequisites
+---
 
-Before you begin, ensure you have the following installed:
-- Node.js 22.x
-- Docker
-- Yarn or NPM
-- Git
+## Code of Conduct
 
-## Setting Up Development Environment
+Be respectful, constructive, and kind. Harassment in any form is not tolerated. By participating you agree to uphold these standards.
 
-### 1. Clone the Repository
+---
+
+## How to Report a Bug
+
+1. Search [existing issues](https://github.com/brittytino/fossa/issues) to avoid duplicates.
+2. If none exist, open a new issue using the **Bug report** template.
+3. Include reproduction steps, expected vs actual behavior, exact error text, version, and environment details.
+
+> **Security vulnerabilities** � please follow the [Security Policy](./SECURITY.md) and do **not** file a public issue.
+
+---
+
+## How to Request a Feature
+
+1. Open an issue using the **Feature request** template.
+2. Issues labelled `?? needs approval` are awaiting core review � please wait before opening a PR.
+3. Once approved (label removed), feel free to start coding or volunteer in the thread.
+
+---
+
+## Development Setup
+
+### Requirements
+
+- Node.js 22.x ([`.nvmrc`](./.nvmrc)) � run `nvm use` if needed
+- pnpm 11.9.0 � `npm i -g pnpm@11.9.0`
+- Docker + Docker Compose
+
+### First-time setup
+
 ```bash
+# Clone the repo
 git clone https://github.com/brittytino/fossa.git
-cd fossa-ai
-```
+cd fossa
 
-### 2. Install Dependencies
-```bash
+# Install dependencies
 pnpm install
-```
 
-### 3. Configure Environment Variables
-
-**Fossa engineers (1Password):**
-
-```bash
-pnpm run env:pull
-```
-
-Pulls secrets from the `Fossa Dev` 1Password vault into a fresh `.env`.
-First-time setup (install `op` CLI, get vault access) is in
-[`scripts/env/README.md`](./scripts/env/README.md#pulling-values-from-1password).
-
-**External contributors:**
-
-```bash
+# Copy the example env file
 cp .env.example .env
-```
 
-Then fill in required values by hand — comments in `.env.example` say which are required. Refer to the [Orchestrator documentation](https://docs.fossa.local/how_to_deploy/en/local_quickstart/orchestrator) for detailed configuration instructions.
-
-### 4. Set Up Docker Networks
-```bash
-docker network create fossa-backend-services
-docker network create shared-network
-```
-
-### 5. Start Development Environment
-```bash
+# Start infra (Postgres, MongoDB, RabbitMQ) + all services
 pnpm run docker:start
 ```
 
-### 6. First-time Setup
-No additional command is needed for migrations/seed in the default Docker flow.
-`pnpm run docker:start` already runs backend migrations + seed automatically.
+See [`.env.example`](./.env.example) for all environment variables and their documentation.
 
-### Frontend in Monorepo
-The web frontend is now in this same repository under `apps/web`.
+---
 
-- Run full stack (backend + web): `pnpm run docker:start`
-- Run only web locally: `pnpm run web:install && pnpm run web:dev`
+## Making a Pull Request
 
-Default local endpoints:
+1. **Fork** the repository and create your branch from `main`:
+   ```bash
+   git checkout -b feat/my-feature
+   ```
+2. **Write tests** for any new behavior. Existing tests must not regress.
+3. **Lint and format** before pushing:
+   ```bash
+   pnpm run lint
+   pnpm run format
+   ```
+4. **Open a PR** against `main` using the PR template. Fill in every section.
+5. Keep PRs focused � one concern per PR makes review faster.
 
-- Web: `http://localhost:3000`
-- API: `http://localhost:3001`
+### PR title format
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) � CI enforces this:
+
+```
+feat(web): add dark mode toggle
+fix(api): handle null reviewer assignment
+docs: update self-hosted quickstart
+refactor(libs/ai-engine): extract prompt builder
+```
+
+| Prefix | Changelog section |
+|--------|------------------|
+| `feat:` | Improvements |
+| `fix:` | Bug fixes |
+| `perf:` | Performance |
+| `docs:`, `refactor:`, `chore:`, `ci:`, `test:` | Hidden from public changelog |
+
+---
+
+## Coding Standards
+
+- **TypeScript (ES2022)** everywhere � no `any` unless justified with a comment.
+- **NestJS patterns**: Module ? Controller ? UseCase ? Service/Repository.
+- **Path aliases**: `@libs/*` for shared libraries, `@apps/*` for applications.
+- **No new EE / commercial gating** � FOSSA is 100% open source.
+- **No telemetry additions** without an explicit opt-in mechanism.
+- Prefer explicit dependency injection via NestJS tokens over tight coupling.
+
+---
+
+## Commit Message Format
+
+```
+<type>(<scope>): <short description>
+
+[optional body � explain WHY, not WHAT]
+
+[optional footer: Closes #123]
+```
+
+Use `!` after the type/scope for breaking changes: `feat(api)!: remove v1 endpoint`.
+
+---
+
+## Running Tests
+
+```bash
+# Unit + integration tests (requires infra running)
+pnpm run test
+
+# Watch mode
+pnpm run test:watch
+
+# RBAC / permission matrix
+pnpm run test:rbac
+
+# TypeScript type check
+pnpm run typecheck
+```
+
+---
 
 ## Project Structure
 
-The repository is organized as a monorepo:
-
 ```
-├── apps/
-│   ├── api/
-│   ├── webhooks/
-│   ├── worker/
-│   └── web/
-├── libs/
-├── packages/
-├── test/
-├── scripts/
-│   ├── dev/
-│   ├── docker/
-│   ├── gitops/
-│   └── ...
-├── docker/
-└── docs/
+fossa/
++-- apps/
+�   +-- api/        NestJS REST API
+�   +-- web/        Next.js 15 dashboard
+�   +-- worker/     RabbitMQ consumer
+�   +-- webhooks/   Webhook ingestion
+�   +-- cli/        @fossa/cli terminal tool
+�   +-- mcp-manager MCP server
++-- libs/           20 shared NestJS domain modules
++-- evals/          LLM evaluation harness
++-- docs/           Documentation (Mintlify)
 ```
 
-## Code Conventions
+---
 
-- Follow TypeScript best practices
-- Use ESLint and Prettier for code formatting
-- Write meaningful comments and documentation
-- Follow SOLID principles
-- Use dependency injection where appropriate
-- Write unit tests for new features
+## Questions?
 
-## Contribution Process
-
-1. Fork the repository
-2. Create a new branch for your feature/fix
-3. Make your changes
-4. Write/update tests
-5. Update documentation
-6. Submit a pull request
-
-### Pull Request Guidelines
-- Provide a clear description of changes
-- Reference related issues
-- Ensure all tests pass
-- Update documentation as needed
-- Follow the commit message convention
-
-## Testing
-
-We use Jest for testing. Run tests with:
-```bash
-pnpm run test
-```
-
-For specific test types:
-```bash
-pnpm run test:e2e     # End-to-end tests
-pnpm run test:cov     # Test coverage
-pnpm run test:watch   # Watch mode
-```
-
-## Documentation
-
-- Keep documentation up-to-date
-- Use clear and concise language
-- Include examples where appropriate
-- Document API changes
-- Update README when necessary
-
-## Commit Guidelines
-
-We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
-
-```
-<type>[optional scope]: <description>
-
-[optional body]
-
-[optional footer(s)]
-```
-
-Types:
-- feat: New feature
-- fix: Bug fix
-- docs: Documentation changes
-- style: Code style changes
-- refactor: Code refactoring
-- test: Test changes
-- chore: Maintenance tasks
-
-## Getting Help
-
-If you need help or have questions:
-- Check our [documentation](https://docs.fossa.local)
-- Open an issue
-- Join our community chat
-
-Thank you for contributing to Fossa! 
+Open a [Discussion](https://github.com/brittytino/fossa/discussions) or check the existing issues. We are happy to help!

@@ -1,0 +1,87 @@
+# FOSSA GitHub Labels
+# Sync with: gh label import .github/labels.yml
+# Or use: https://github.com/nicedoc/labels
+
+- name: "?? bug"
+  color: "d73a4a"
+  description: "Something is broken"
+
+- name: "? feature"
+  color: "a2eeef"
+  description: "New feature or improvement request"
+
+- name: "?? docs"
+  color: "0075ca"
+  description: "Documentation improvements"
+
+- name: "?? chore"
+  color: "e4e669"
+  description: "Maintenance, refactoring, tooling"
+
+- name: "? performance"
+  color: "f4a261"
+  description: "Performance improvement"
+
+- name: "?? security"
+  color: "e11d48"
+  description: "Security-related issue or fix"
+
+- name: "?? needs approval"
+  color: "fbca04"
+  description: "Awaiting core team approval before work starts"
+
+- name: "? approved"
+  color: "0e8a16"
+  description: "Approved by a core member — ready for implementation"
+
+- name: "?? good first issue"
+  color: "7057ff"
+  description: "Suitable for first-time contributors"
+
+- name: "?? help wanted"
+  color: "008672"
+  description: "Community help is welcome"
+
+- name: "?? dependencies"
+  color: "0366d6"
+  description: "Dependency version bumps"
+
+- name: "?? tests"
+  color: "bfd4f2"
+  description: "Test coverage or testing infrastructure"
+
+- name: "?? fossy"
+  color: "5e17eb"
+  description: "Related to the Fossy AI reviewer agent"
+
+- name: "?? ai-engine"
+  color: "7c3aed"
+  description: "LLM / AI engine changes"
+
+- name: "?? integrations"
+  color: "2563eb"
+  description: "Git platform integration (GitHub, GitLab, Bitbucket, Azure, Forgejo)"
+
+- name: "?? docker"
+  color: "0ea5e9"
+  description: "Docker / self-hosted deployment"
+
+- name: "?? cli"
+  color: "059669"
+  description: "FOSSA terminal CLI (@fossa/cli)"
+
+- name: "?? cockpit"
+  color: "d97706"
+  description: "Engineering analytics / cockpit dashboard"
+
+- name: "?? wontfix"
+  color: "ffffff"
+  description: "This will not be worked on"
+
+- name: "?? duplicate"
+  color: "cfd3d7"
+  description: "This issue or PR already exists"
+
+- name: "? blocked"
+  color: "b91c1c"
+  description: "Blocked by another issue or external dependency"

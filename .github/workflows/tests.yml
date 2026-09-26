@@ -125,13 +125,6 @@ jobs:
               # apps/web/pnpm-lock.yaml and the store is shared).
               run: cd apps/web && pnpm install --frozen-lockfile
 
-            - name: Create environment.ts for tests
-              run: |
-                  cat <<'EOF' > libs/ee/configs/environment/environment.ts
-                  import { environment as devEnvironment } from './environment.dev';
-
-                  export const environment = devEnvironment;
-                  EOF
 
             - name: Enable pgvector extension
               if: github.event.pull_request.head.repo.fork == false

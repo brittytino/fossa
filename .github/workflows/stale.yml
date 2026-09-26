@@ -1,0 +1,46 @@
+name: "Housekeeping: Mark Stale Issues & PRs"
+
+on:
+  schedule:
+    # Run daily at 01:00 UTC
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+jobs:
+  stale:
+    name: Mark & close stale items
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/stale@v9.1.0
+        with:
+          # Issues: stale after 60 days, close after 14 more
+          days-before-issue-stale: 60
+          days-before-issue-close: 14
+          stale-issue-label: "stale"
+          stale-issue-message: >
+            This issue has been open for 60 days without activity.
+            It will be closed in 14 days unless there is new activity.
+            If this is still relevant, please comment or add a ?? reaction.
+          close-issue-message: >
+            Closing due to inactivity. Feel free to re-open if this is still relevant.
+
+          # PRs: stale after 30 days, close after 14 more
+          days-before-pr-stale: 30
+          days-before-pr-close: 14
+          stale-pr-label: "stale"
+          stale-pr-message: >
+            This PR has been open for 30 days without activity.
+            It will be closed in 14 days unless there is new activity.
+          close-pr-message: >
+            Closing due to inactivity. The branch can be restored if needed.
+
+          # Labels that exempt items from staleness
+          exempt-issue-labels: "? blocked,?? needs approval,? approved,?? security"
+          exempt-pr-labels: "? blocked,?? security"
+
+          # Do not stale pinned issues
+          exempt-all-milestones: true

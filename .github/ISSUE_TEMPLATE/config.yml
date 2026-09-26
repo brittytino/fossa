@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-    - name: Questions / Discord
-      url: https://discord.com/invite/TFZBRk9fT6
-      about: Need help selfhosting or ask a general question about the project? Join our Discord server
+    - name: "?? Ask a question / GitHub Discussions"
+      url: https://github.com/brittytino/fossa/discussions
+      about: General questions, self-hosting help, and idea discussion
+    - name: "?? Security vulnerability"
+      url: https://github.com/brittytino/fossa/security/advisories/new
+      about: Report security issues privately — do NOT open a public issue

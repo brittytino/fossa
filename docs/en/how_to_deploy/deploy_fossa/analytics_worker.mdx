@@ -1,20 +1,15 @@
 ---
 title: "Analytics Worker"
-description: "Optional analytics ingestion worker for self-hosted Enterprise. Powers the Cockpit dashboards (DORA, lifecycle, classifier)."
+description: "Optional analytics ingestion worker for self-hosted Fossa. Powers the Cockpit dashboards (DORA, lifecycle, classifier)."
 icon: "chart-line"
-tag: "enterprise"
+tag: "self-hosted"
 ---
 
-The analytics worker is an **Enterprise-only** add-on. It runs the
-ingestion cron that powers the Cockpit dashboards (DORA-style metrics,
-PR lifecycle, LLM-based PR classifier).
+The analytics worker is an optional worker role (`WORKER_ROLE=analytics`) that powers the Cockpit dashboards (DORA-style metrics, PR lifecycle, and LLM-based PR classifier).
 
-<Warning>
-The default installer **does not** ship this worker. Community self-hosted
-deployments don't need it and these vars are filtered out of the default
-`.env.example`. Stop here unless you have a self-hosted Enterprise
-license and want the Cockpit reports.
-</Warning>
+<Info>
+Cockpit analytics is 100% free and open-source. Running the analytics worker as a dedicated service keeps analytical aggregation queries separated from real-time code-review pipelines.
+</Info>
 
 ## What it does
 
@@ -55,7 +50,7 @@ flowchart LR
     cockpit[Cockpit UI] --> analytics
 ```
 
-## Enabling on self-hosted Enterprise
+## Enabling in Self-Hosted
 
 ### 1. Add the service to `docker-compose.yml`
 

@@ -1956,6 +1956,53 @@ function getCockpitHtml() {
       flex-direction: column;
     }
 
+    .window-bar {
+      height: 40px;
+      background: #090B10;
+      border-bottom: 1px solid #1A1D2B;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+    }
+    .window-dots {
+      display: flex;
+      gap: 8px;
+    }
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .dot-red { background: #FF5F56; }
+    .dot-yellow { background: #FFBD2E; }
+    .dot-green { background: #27C93F; }
+    .window-url-bar {
+      background: #050608;
+      border: 1px solid #1A1D2B;
+      border-radius: 6px;
+      padding: 4px 24px;
+      font-size: 12px;
+      color: #94A3B8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .window-actions {
+      display: flex;
+      align-items: center;
+    }
+    .window-badge {
+      font-size: 11px;
+      color: #F59E0B;
+      font-weight: 600;
+      background: rgba(245, 158, 11, 0.1);
+      border: 1px solid rgba(245, 158, 11, 0.25);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
     .navbar {
       height: 72px;
       background: #08090D;
@@ -2174,6 +2221,20 @@ function getCockpitHtml() {
   </style>
 </head>
 <body>
+  <div class="window-bar">
+    <div class="window-dots">
+      <div class="dot dot-red"></div>
+      <div class="dot dot-yellow"></div>
+      <div class="dot dot-green"></div>
+    </div>
+    <div class="window-url-bar">
+      <span>🔒</span>
+      <span>https://app.fossa.local/cockpit</span>
+    </div>
+    <div class="window-actions">
+      <span class="window-badge">v2.4.0 Self-Hosted</span>
+    </div>
+  </div>
 
   <div class="navbar">
     <div class="nav-left">
@@ -2319,6 +2380,53 @@ function getIssuesHtml() {
       overflow: hidden;
       display: flex;
       flex-direction: column;
+    }
+
+    .window-bar {
+      height: 40px;
+      background: #090B10;
+      border-bottom: 1px solid #1A1D2B;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+    }
+    .window-dots {
+      display: flex;
+      gap: 8px;
+    }
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .dot-red { background: #FF5F56; }
+    .dot-yellow { background: #FFBD2E; }
+    .dot-green { background: #27C93F; }
+    .window-url-bar {
+      background: #050608;
+      border: 1px solid #1A1D2B;
+      border-radius: 6px;
+      padding: 4px 24px;
+      font-size: 12px;
+      color: #94A3B8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .window-actions {
+      display: flex;
+      align-items: center;
+    }
+    .window-badge {
+      font-size: 11px;
+      color: #F59E0B;
+      font-weight: 600;
+      background: rgba(245, 158, 11, 0.1);
+      border: 1px solid rgba(245, 158, 11, 0.25);
+      padding: 2px 8px;
+      border-radius: 4px;
     }
 
     .navbar {
@@ -2530,6 +2638,20 @@ function getIssuesHtml() {
   </style>
 </head>
 <body>
+  <div class="window-bar">
+    <div class="window-dots">
+      <div class="dot dot-red"></div>
+      <div class="dot dot-yellow"></div>
+      <div class="dot dot-green"></div>
+    </div>
+    <div class="window-url-bar">
+      <span>🔒</span>
+      <span>https://app.fossa.local/issues</span>
+    </div>
+    <div class="window-actions">
+      <span class="window-badge">v2.4.0 Self-Hosted</span>
+    </div>
+  </div>
 
   <div class="navbar">
     <div class="nav-left">
@@ -2946,7 +3068,13 @@ renderHtmlToPng(
   getCockpitHtml(),
   path.join(docsImagesDir, 'cockpit.png'),
   2200,
-  680
+  740
+);
+renderHtmlToPng(
+  getCockpitHtml(),
+  path.join(docsImagesDir, 'fossa_cockpit.png'),
+  2200,
+  740
 );
 
 // 7. Issues dashboard mockup
@@ -2954,13 +3082,25 @@ renderHtmlToPng(
   getIssuesHtml(),
   path.join(docsImagesDir, 'issues.png'),
   2200,
-  740
+  780
+);
+renderHtmlToPng(
+  getIssuesHtml(),
+  path.join(docsImagesDir, 'fossa_issues.png'),
+  2200,
+  780
 );
 
 // 8. Flow diagram
 renderHtmlToPng(
   getFlowHtml(),
   path.join(docsImagesDir, 'flow.png'),
+  2200,
+  860
+);
+renderHtmlToPng(
+  getFlowHtml(),
+  path.join(docsImagesDir, 'fossa_flow.png'),
   2200,
   860
 );

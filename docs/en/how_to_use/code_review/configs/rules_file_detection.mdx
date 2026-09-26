@@ -6,7 +6,7 @@ description: "Automatically detect and import your existing rule files from popu
 Fossa can automatically sync and import your existing IDE rule files to enhance Fossy's code review with your team's established coding standards and preferences.
 
 <Frame caption="Enable Auto-sync rules from repo in your settings">
-  <img src="/images/sync-rules.png" />
+  <img src="/images/fossa_sync_rules.png" />
 </Frame>
 
 ## What is Rules File Detection?
@@ -114,4 +114,4 @@ If a rule shows as active in the UI but never appears in `[fossy-rules-eval]` fo
 
 ## Rule limits
 
-Self-hosted instances running **without a valid license** (Community Edition) evaluate at most **10 rules** per review (oldest first). Licensed self-hosted and cloud instances have no such limit. If rules beyond the 10th silently don't fire on an unlicensed instance, this limit is why.
+Fossa evaluates all configured active rules across your repositories with zero artificial limitations. Every rule matching the file path will be applied during code review.

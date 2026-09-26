@@ -632,6 +632,12 @@ renderHtmlToPng(
   1400,
   460
 );
+renderHtmlToPng(
+  getSyncRulesHtml(),
+  path.join(docsImagesDir, 'fossa_sync_rules.png'),
+  1400,
+  460
+);
 
 renderHtmlToPng(
   getTokenHtml(),
@@ -639,10 +645,22 @@ renderHtmlToPng(
   1400,
   180
 );
+renderHtmlToPng(
+  getTokenHtml(),
+  path.join(docsImagesDir, 'fossa_token.png'),
+  1400,
+  180
+);
 
 renderHtmlToPng(
   getCommentMcpHtml(),
   path.join(docsImagesDir, 'comment-mcp.png'),
+  1160,
+  700
+);
+renderHtmlToPng(
+  getCommentMcpHtml(),
+  path.join(docsImagesDir, 'fossa_comment_mcp.png'),
   1160,
   700
 );

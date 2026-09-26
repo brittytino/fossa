@@ -5,7 +5,7 @@ description: "Let Fossy read sibling repositories as context during review — f
 
 Linked Repositories let Fossy read other repositories of your organization as **read-only context** while reviewing a pull request. Without it, the review sees exactly one thing: the repository under review, checked out at the PR's head. Anything that lives in another repository — a service you call, a library you import, a git submodule — is invisible.
 
-Available on **Teams and Enterprise** plans. Configured **per repository** — there is no global default, because relationships are directional: linking `frontend → backend-api` means *reviews of `frontend`* may consult `backend-api`, not the other way around. Link both directions explicitly if both teams want the check.
+Available across all self-hosted deployments. Configured **per repository** — there is no global default, because relationships are directional: linking `frontend → backend-api` means *reviews of `frontend`* may consult `backend-api`, not the other way around. Link both directions explicitly if both teams want the check.
 
 ## When you need it
 

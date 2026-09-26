@@ -7,18 +7,18 @@ description: "Comprehensive analytics and metrics for engineering team performan
 
 Cockpit Analytics provides comprehensive insights into your engineering team's performance through key metrics that measure productivity, code quality, and delivery efficiency. These metrics help you identify areas for improvement and track progress over time.
 
-<Warning>
-  Cockpit requires a paid tier: **Teams or Enterprise on cloud**, or **licensed self-hosted Enterprise**. Unlicensed self-hosted (Community) and free BYOK plans don't include it. Self-hosted Enterprise also needs the [Analytics Worker](/en/how_to_deploy/deploy_fossa/analytics_worker) running.
-</Warning>
+<Info>
+  Cockpit Analytics is completely free and built directly into your self-hosted Fossa deployment. To enable real-time background metric calculation and PR classification, ensure the optional [Analytics Worker](/en/how_to_deploy/deploy_fossa/analytics_worker) container (`WORKER_ROLE=analytics`) is running in your stack.
+</Info>
 
 <Frame caption="Monitor your team's performance with real-time analytics.">
-  <img src="/images/cockpit.png" />
+  <img src="/images/fossa_cockpit.png" />
 </Frame>
 
 ## Key Features
 
 - Data refreshes every 30 minutes by default (`ANALYTICS_INGESTION_CRON`)
-- Teams/Enterprise on cloud, or licensed self-hosted Enterprise
+- 100% Free and Self-Hosted across all instances
 - AI-powered metric calculation
 - 8+ DORA and custom metrics
 

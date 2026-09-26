@@ -19,6 +19,8 @@ from internal service traffic:
 
 ## Components
 
+<img src="/images/fossa-architecture.png" alt="Fossa Architecture Overview" className="rounded-xl border border-amber-500/20 shadow-2xl my-6 w-full" />
+
 ```mermaid
 graph LR
     Web[Fossa Web App] --> API[API Service]
@@ -43,7 +45,7 @@ The 2.0 stack splits backend responsibilities into dedicated services:
 - API: Central service layer handling business logic and request processing
 - Worker: Asynchronous processing for queues and background jobs
 - Webhooks: Dedicated service for Git provider webhooks
-- Analytics Worker: Optional ingestion worker (`WORKER_ROLE=analytics`) that powers the Cockpit dashboards. Enterprise-only — see [Analytics Worker](/en/how_to_deploy/deploy_fossa/analytics_worker)
+- Analytics Worker: Ingestion worker (`WORKER_ROLE=analytics`) that powers the Cockpit dashboards.
 
 ### 3. MCP Manager
 
@@ -64,12 +66,9 @@ between API, worker, and webhooks.
 
 Prometheus and Grafana are optional and used for monitoring and visualization.
 
-### 6. Auxiliary Services (Fossa Cloud)
+### 6. Fully Autonomous & Self-Contained
 
-Fossa Cloud includes closed-source auxiliary services (billing and chat
-integrations) that are not required for self-hosted deployments. Analytics is
-not cloud-only: licensed self-hosted Enterprise runs the same ingestion worker
-locally.
+Fossa is 100% free, self-hosted, open-source software under the AGPL-3.0 license. There are no closed-source billing dependencies or cloud-only paywalls: every capability—including DORA metrics analytics in Cockpit, Fossy Rules, universal multi-provider BYOK LLM routing, and MCP plugins—executes entirely within your own self-hosted infrastructure.
 
 ## Next Steps
 <CardGroup cols={2}>

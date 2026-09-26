@@ -19,8 +19,40 @@ permissions:
 
 jobs:
   build-and-push:
-    name: Build and push Docker images
+    name: Build and push ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            context: .
+            file: docker/Dockerfile
+            target: api
+            pkg: fossa-api
+          - name: worker
+            context: .
+            file: docker/Dockerfile
+            target: worker
+            pkg: fossa-worker
+          - name: webhooks
+            context: .
+            file: docker/Dockerfile
+            target: webhooks
+            pkg: fossa-webhook
+          - name: mcp-manager
+            context: .
+            file: docker/Dockerfile
+            target: mcp-manager
+            pkg: fossa-mcp-manager
+          - name: web
+            context: .
+            file: docker/Dockerfile.web
+            pkg: fossa-web
+          - name: rabbitmq
+            context: docker/rabbitMQ
+            file: docker/rabbitMQ/Dockerfile
+            pkg: fossa-rabbitmq
     steps:
       - uses: actions/checkout@v4.1.7
 
@@ -39,25 +71,38 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME:-selfhosted-dev}"
           VERSION="${TAG#selfhosted-}"
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push API image
+      - name: Build and push ${{ matrix.name }} image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: docker/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/api:${{ steps.meta.outputs.version }}
-            ghcr.io/${{ github.repository }}/api:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            SERVICE=api
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.pkg }}:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.pkg }}:latest
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
+  create-release:
+    name: Create GitHub Release
+    needs: build-and-push
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.1.7
+      - name: Extract version tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME:-selfhosted-dev}"
+          VERSION="${TAG#selfhosted-}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

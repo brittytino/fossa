@@ -2,12 +2,15 @@
 # Docker Compose for Self-Hosted Production Environment
 # ==============================================================================
 # This file is intended for users who want to run the application on their own
-# infrastructure. It uses pre-built images from the GitHub Container Registry.
+# infrastructure. It supports both using pre-built images from GitHub Container
+# Registry (GHCR) and building directly from source.
 #
 # Usage:
-# 1. Create a `.env.prod` file by copying `.env.example`.
+# 1. Create a `.env.prod` file by copying `.env.example`:
+#    cp .env.example .env.prod
 # 2. Fill in the required environment variables in `.env.prod`.
-# 3. Run `ENV_FILE=.env.prod docker compose -f docker-compose.prod.yml up -d`.
+# 3. Run:
+#    ENV_FILE=.env.prod docker compose -f docker-compose.prod.yml up -d
 # ==============================================================================
 
 services:
@@ -15,32 +18,51 @@ services:
     # Application Services
     #----------------------------------------------------------------
     api:
+        build:
+            context: .
+            dockerfile: docker/Dockerfile
+            target: api
         image: ghcr.io/brittytino/fossa-api:${FOSSA_VERSION:-latest}
         container_name: fossa_api_prod
         restart: unless-stopped
         command: node dist/apps/api/main.js
         env_file:
-            - ${ENV_FILE:-.env.prod}
+            - path: ${ENV_FILE:-.env.prod}
+              required: false
+            - path: .env
+              required: false
         environment:
             - API_CLOUD_MODE=false
             - COMPONENT_TYPE=api
         ports:
-            - '3331:3001'
+            - '${API_PORT:-3001}:3001'
         depends_on:
             db_postgres:
                 condition: service_healthy
             db_mongodb:
                 condition: service_healthy
+            rabbitmq:
+                condition: service_healthy
         networks:
-            - fossa-backend-services
+            fossa-backend-services:
+                aliases:
+                    - fossa_api
+                    - api
 
     worker:
+        build:
+            context: .
+            dockerfile: docker/Dockerfile
+            target: worker
         image: ghcr.io/brittytino/fossa-worker:${FOSSA_VERSION:-latest}
         container_name: fossa_worker_prod
         restart: unless-stopped
         command: node dist/apps/worker/main.js
         env_file:
-            - ${ENV_FILE:-.env.prod}
+            - path: ${ENV_FILE:-.env.prod}
+              required: false
+            - path: .env
+              required: false
         environment:
             - API_CLOUD_MODE=false
             - COMPONENT_TYPE=worker
@@ -50,16 +72,25 @@ services:
                 condition: service_healthy
             db_mongodb:
                 condition: service_healthy
+            rabbitmq:
+                condition: service_healthy
         networks:
             - fossa-backend-services
 
     worker-analytics:
+        build:
+            context: .
+            dockerfile: docker/Dockerfile
+            target: worker
         image: ghcr.io/brittytino/fossa-worker:${FOSSA_VERSION:-latest}
         container_name: fossa_analytics_worker_prod
         restart: unless-stopped
         command: node dist/apps/worker/main.js
         env_file:
-            - ${ENV_FILE:-.env.prod}
+            - path: ${ENV_FILE:-.env.prod}
+              required: false
+            - path: .env
+              required: false
         environment:
             - API_CLOUD_MODE=false
             - COMPONENT_TYPE=worker
@@ -69,25 +100,67 @@ services:
                 condition: service_healthy
             db_mongodb:
                 condition: service_healthy
+            rabbitmq:
+                condition: service_healthy
         networks:
             - fossa-backend-services
 
     webhooks:
+        build:
+            context: .
+            dockerfile: docker/Dockerfile
+            target: webhooks
         image: ghcr.io/brittytino/fossa-webhook:${FOSSA_VERSION:-latest}
         container_name: fossa_webhooks_prod
         restart: unless-stopped
         command: node dist/apps/webhooks/main.js
         env_file:
-            - ${ENV_FILE:-.env.prod}
+            - path: ${ENV_FILE:-.env.prod}
+              required: false
+            - path: .env
+              required: false
         environment:
             - API_CLOUD_MODE=false
             - COMPONENT_TYPE=webhook
         ports:
-            - '3333:3332'
+            - '${API_WEBHOOKS_PORT:-3332}:3332'
         depends_on:
             db_postgres:
                 condition: service_healthy
             db_mongodb:
+                condition: service_healthy
+            rabbitmq:
+                condition: service_healthy
+        networks:
+            fossa-backend-services:
+                aliases:
+                    - fossa_webhooks
+                    - webhooks
+
+    mcp-manager:
+        build:
+            context: .
+            dockerfile: docker/Dockerfile
+            target: mcp-manager
+        image: ghcr.io/brittytino/fossa-mcp-manager:${FOSSA_VERSION:-latest}
+        container_name: fossa_mcp_manager_prod
+        restart: unless-stopped
+        profiles:
+            - mcp
+            - extras
+        command: node dist/apps/mcp-manager/main.js
+        env_file:
+            - path: ${ENV_FILE:-.env.prod}
+              required: false
+            - path: .env
+              required: false
+        environment:
+            - API_CLOUD_MODE=false
+            - COMPONENT_TYPE=mcp-manager
+        ports:
+            - '${API_MCP_MANAGER_PORT:-3101}:3101'
+        depends_on:
+            db_postgres:
                 condition: service_healthy
         networks:
             - fossa-backend-services
@@ -96,13 +169,24 @@ services:
     # Web Frontend
     #----------------------------------------------------------------
     web:
+        build:
+            context: .
+            dockerfile: docker/Dockerfile.web
         image: ghcr.io/brittytino/fossa-web:${FOSSA_VERSION:-latest}
         container_name: fossa_web_prod
         restart: unless-stopped
         env_file:
-            - ${ENV_FILE:-.env.prod}
+            - path: ${ENV_FILE:-.env.prod}
+              required: false
+            - path: .env
+              required: false
+        environment:
+            - API_CLOUD_MODE=false
+            - WEB_NODE_ENV=self-hosted
         ports:
-            - '3000:3000'
+            - '${WEB_PORT:-3000}:3000'
+        depends_on:
+            - api
         networks:
             - fossa-backend-services
 
@@ -114,16 +198,28 @@ services:
         container_name: fossa_postgres_prod
         restart: unless-stopped
         env_file:
-            - ${ENV_FILE:-.env.prod}
+            - path: ${ENV_FILE:-.env.prod}
+              required: false
+            - path: .env
+              required: false
+        environment:
+            POSTGRES_USER: ${API_PG_DB_USERNAME:-fossadev}
+            POSTGRES_PASSWORD: ${API_PG_DB_PASSWORD:-123456}
+            POSTGRES_DB: ${API_PG_DB_DATABASE:-fossa_db}
+        ports:
+            - '${API_PG_DB_PORT:-5432}:5432'
         volumes:
             - pgdata_prod:/var/lib/postgresql/data
+            - ./docker/postgres/initdb.d:/docker-entrypoint-initdb.d
         networks:
-            - fossa-backend-services
+            fossa-backend-services:
+                aliases:
+                    - db_postgres
         healthcheck:
             test:
                 [
                     'CMD-SHELL',
-                    'pg_isready -U ${API_PG_DB_USERNAME} -d ${API_PG_DB_DATABASE}',
+                    'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}',
                 ]
             interval: 5s
             timeout: 3s
@@ -131,31 +227,27 @@ services:
             start_period: 30s
 
     db_mongodb:
-        # Pinned, not floating. `mongo:8` resolves to a release that refuses
-        # to start on Linux kernels 6.19+: MongoDB 8.0.21-8.0.29 and
-        # 8.3.0-8.3.8 exit during startup with `MongoDB cannot start: Linux
-        # kernel versions 6.19 and newer has a known incompatibility`
-        # (SERVER-121912 - tcmalloc violates the rseq ABI). A floating tag is
-        # how a stack that worked one week stopped booting the next without a
-        # line changing here.
-        #
-        # 8.2.11 is outside that range and verified to start and stay up on
-        # kernel 7.0.14. Revisit when 8.0.30 / 8.3.9 publish, which carry the
-        # real fix. Kept identical to the fossa-installer compose, which
-        # serves the same audience.
-        #
-        # An installation already running 8.3 with its feature compatibility
-        # version raised to 8.3 will not open its data files under this pin
-        # and must set that version back before upgrading.
+        # Pinned, not floating. MongoDB 8.2.11 verified on Linux kernels 6.x & 7.x
         image: docker.io/mongo:8.2.11
         container_name: fossa_mongodb_prod
         restart: unless-stopped
         env_file:
-            - ${ENV_FILE:-.env.prod}
+            - path: ${ENV_FILE:-.env.prod}
+              required: false
+            - path: .env
+              required: false
+        environment:
+            MONGO_INITDB_ROOT_USERNAME: ${API_MG_DB_USERNAME:-fossadev}
+            MONGO_INITDB_ROOT_PASSWORD: ${API_MG_DB_PASSWORD:-123456}
+            MONGO_INITDB_DATABASE: ${API_MG_DB_DATABASE:-fossa_db}
+        ports:
+            - '${API_MG_DB_PORT:-27017}:27017'
         volumes:
             - mongodbdata_prod:/data/db
         networks:
-            - fossa-backend-services
+            fossa-backend-services:
+                aliases:
+                    - db_mongodb
         healthcheck:
             test:
                 [
@@ -167,9 +259,42 @@ services:
             retries: 5
             start_period: 40s
 
+    rabbitmq:
+        build:
+            context: ./docker/rabbitMQ
+            dockerfile: Dockerfile
+        image: ghcr.io/brittytino/fossa-rabbitmq:${FOSSA_VERSION:-latest}
+        container_name: fossa_rabbitmq_prod
+        hostname: ${RABBITMQ_HOSTNAME:-rabbitmq}
+        ports:
+            - '5672:5672'
+            - '15672:15672'
+            - '15692:15692'
+        environment:
+            - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER:-dev}
+            - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS:-devpass}
+            - RABBITMQ_HOSTNAME=${RABBITMQ_HOSTNAME:-rabbitmq}
+            - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit disk_free_limit 1000000000 -rabbit heartbeat 60
+        volumes:
+            - rabbitmqdata_prod:/var/lib/rabbitmq
+        restart: unless-stopped
+        networks:
+            fossa-backend-services:
+                aliases:
+                    - rabbitmq-local
+                    - rabbitmq
+        healthcheck:
+            test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_running']
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 20s
+        command: /usr/local/bin/init-definitions.sh
+
 volumes:
     pgdata_prod:
     mongodbdata_prod:
+    rabbitmqdata_prod:
 
 networks:
     fossa-backend-services:

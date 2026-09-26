@@ -29,13 +29,31 @@ API_FOSSA_MCP_SERVER_URL=http://fossa-api.yourdomain.com/mcp # Fossa MCP Server 
 
 ### LLM Provider Configuration
 
+Configure your primary AI model and key (Claude, OpenAI, Gemini, OpenRouter, or any OpenAI-compatible provider). You can also configure an optional fallback model for automatic failover during rate limits or outages:
+
 ```env
-API_LLM_PROVIDER_MODEL="gpt-5"     # Model you want to use
-API_OPENAI_FORCE_BASE_URL="https://your-api.com/v1"  # Your API provider URL
-API_OPEN_AI_API_KEY="your-api-key"          # Your API provider key
+# Example 1: Claude (Anthropic)
+API_LLM_PROVIDER_MODEL="claude-3-5-sonnet-20241022"
+API_ANTHROPIC_API_KEY="sk-ant-api03-..."
+
+# Example 2: OpenAI
+# API_LLM_PROVIDER_MODEL="gpt-4o"
+# API_OPEN_AI_API_KEY="sk-proj-..."
+
+# Example 3: Google Gemini
+# API_LLM_PROVIDER_MODEL="gemini-2.5-flash"
+# API_GOOGLE_AI_API_KEY="AIzaSy..." # or GEMINI_API_KEY
+
+# Example 4: OpenRouter
+# API_LLM_PROVIDER_MODEL="anthropic/claude-3.5-sonnet"
+# API_OPEN_ROUTER_API_KEY="sk-or-v1-..."
+
+# Optional Automatic Fallback API (failover on rate limits / 429 / 5xx)
+API_LLM_FALLBACK_PROVIDER_MODEL="gemini-2.5-flash"
+GEMINI_API_KEY="AIzaSy..."
 ```
 
-Check our [model-specific guides](https://docs.fossa.local/en/knowledge_base/can-i-use-my-own-llm-provider) for detailed setup instructions with popular providers like Novita, OpenAI, Anthropic, and more.
+Check our [model configuration guides](/en/knowledge_base/can-i-use-my-own-llm-provider) for detailed setup instructions with all supported providers.
 
 ### Database configuration
 

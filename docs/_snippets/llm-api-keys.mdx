@@ -1,48 +1,78 @@
 <Tabs>
-    <Tab title="Fixed Mode (Recommended for Self-Hosted)">
-        This is the simplest mode and recommended for self-hosted installations. You only need to configure a single LLM model.
+    <Tab title="Claude (Anthropic)">
+        Native integration using `@ai-sdk/anthropic` with prompt caching and adaptive reasoning.
 
         ```env
-        # Fixed Mode Configuration
-        API_LLM_PROVIDER_MODEL="gpt-3.5-turbo"     # Model you want to use
-        API_OPENAI_FORCE_BASE_URL="https://your-api.com/v1"  # Your API provider URL
-        API_OPEN_AI_API_KEY="your-api-key"          # Your API provider key
+        # Claude Configuration
+        API_LLM_PROVIDER_MODEL="claude-3-5-sonnet-20241022"
+        API_ANTHROPIC_API_KEY="sk-ant-api03-..."
         ```
-
-        <Info>
-            This mode is ideal for self-hosted because:
-            - Requires only a single API key
-            - Works with any OpenAI-compatible API provider
-            - Easier to configure and maintain
-        </Info>
-
-        <Card
-            title="Model Configuration Guides"
-            icon="sparkles"
-            href="/en/knowledge_base/can-i-use-my-own-llm-provider"
-        >
-            Check our model-specific guides for detailed setup instructions with popular providers like Novita, OpenAI, Anthropic, and more.
-        </Card>
-
     </Tab>
 
-    <Tab title="Automatic Mode (High Quality)">
-        This mode uses multiple LLM models to achieve the best possible results. Requires more configuration but offers the highest quality analysis.
+    <Tab title="OpenAI">
+        Native integration using `@ai-sdk/openai` with structured outputs and reasoning effort support.
 
         ```env
-        # Automatic Mode Configuration
-        API_OPEN_AI_API_KEY=                       # OpenAI API key
-        API_GOOGLE_AI_API_KEY=                     # Google AI API key
-        API_ANTHROPIC_API_KEY=                     # Anthropic API key
-        API_NOVITA_AI_API_KEY=                     # Novita AI API key
-        API_VERTEX_AI_API_KEY=                     # Vertex AI API key
+        # OpenAI Configuration
+        API_LLM_PROVIDER_MODEL="gpt-4o"
+        API_OPEN_AI_API_KEY="sk-proj-..."
         ```
+    </Tab>
 
-        <Info>
-            This mode offers the best quality because:
-            - Uses multiple specialized models
-            - Our pipeline is optimized to extract the best from each model
-            - Ideal for enterprise installations prioritizing quality
-        </Info>
+    <Tab title="Google Gemini">
+        Native integration using `@ai-sdk/google` (Google AI Studio) or `@ai-sdk/google-vertex`.
+
+        ```env
+        # Google Gemini Configuration
+        API_LLM_PROVIDER_MODEL="gemini-2.5-flash"
+        API_GOOGLE_AI_API_KEY="AIzaSy..." # or GEMINI_API_KEY="AIzaSy..."
+        ```
+    </Tab>
+
+    <Tab title="OpenRouter">
+        Route any model through OpenRouter (Claude, DeepSeek, Llama, Gemini, etc.).
+
+        ```env
+        # OpenRouter Configuration (endpoint auto-configured to https://openrouter.ai/api/v1)
+        API_LLM_PROVIDER_MODEL="anthropic/claude-3.5-sonnet"
+        API_OPEN_ROUTER_API_KEY="sk-or-v1-..."
+        ```
+    </Tab>
+
+    <Tab title="OpenAI-Compatible (Groq, Together, Ollama, vLLM)">
+        Point Fossa at any custom OpenAI-compatible provider or local inference engine.
+
+        ```env
+        # Custom Provider / Local Proxy Configuration
+        API_LLM_PROVIDER_MODEL="llama-3.3-70b-versatile"
+        API_OPENAI_FORCE_BASE_URL="https://api.groq.com/openai/v1"
+        API_OPEN_AI_API_KEY="gsk_..."
+        ```
+    </Tab>
+
+    <Tab title="Automatic Fallback API (Resilience)">
+        Ensure 100% review uptime: if your primary model encounters rate limits (HTTP 429) or upstream outages (HTTP 5xx), Fossa automatically fails over to the fallback model.
+
+        ```env
+        # Primary Model
+        API_LLM_PROVIDER_MODEL="claude-3-5-sonnet-20241022"
+        API_ANTHROPIC_API_KEY="sk-ant-api03-..."
+
+        # Automatic Fallback Model
+        API_LLM_FALLBACK_PROVIDER_MODEL="gemini-2.5-flash"
+        GEMINI_API_KEY="AIzaSy..."
+
+        # Optional: dedicated fallback key or base URL (if not using global provider keys)
+        # API_LLM_FALLBACK_API_KEY="your-fallback-key"
+        # API_LLM_FALLBACK_BASE_URL="https://openrouter.ai/api/v1"
+        ```
     </Tab>
 </Tabs>
+
+<Card
+    title="Model Configuration Guides"
+    icon="sparkles"
+    href="/en/knowledge_base/can-i-use-my-own-llm-provider"
+>
+    Check our knowledge base for setup instructions, BYOK details, and cookbook examples for all supported providers.
+</Card>

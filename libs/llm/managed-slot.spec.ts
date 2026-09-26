@@ -14,6 +14,8 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import {
     resolveEnvProvider,
+    resolveEnvFallbackProvider,
+    resolveEnvFallbackSlot,
     resolveManagedSlot,
     hasManagedModelKey,
     getModelName,
@@ -44,11 +46,21 @@ jest.mock('./model-builders', () => ({
 const ENV_KEYS = [
     'API_LLM_PROVIDER_MODEL',
     'API_OPEN_AI_API_KEY',
+    'OPENAI_API_KEY',
+    'API_ANTHROPIC_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'API_OPEN_ROUTER_API_KEY',
+    'API_OPENROUTER_API_KEY',
+    'OPENROUTER_API_KEY',
     'API_OPENAI_FORCE_BASE_URL',
     'API_VERTEX_AI_API_KEY',
     'API_VERTEX_AI_LOCATION',
     'API_GOOGLE_AI_API_KEY',
     'GOOGLE_GENERATIVE_AI_API_KEY',
+    'GEMINI_API_KEY',
+    'API_LLM_FALLBACK_PROVIDER_MODEL',
+    'API_LLM_FALLBACK_API_KEY',
+    'API_LLM_FALLBACK_BASE_URL',
     'API_FIREWORKS_API_KEY',
     'FIREWORKS_API_KEY',
     'API_FIREWORKS_BASE_URL',
@@ -183,9 +195,107 @@ describe('resolveEnvProvider — the self-hosted prefix/key cascade', () => {
         });
     });
 
+    it('claude-* + native API_ANTHROPIC_API_KEY → claude_anthropic', () => {
+        process.env.API_LLM_PROVIDER_MODEL = 'claude-3-5-sonnet-20241022';
+        process.env.API_ANTHROPIC_API_KEY = 'sk-ant-api03';
+        expect(resolveEnvProvider()).toEqual({
+            kind: 'claude_anthropic',
+            name: 'anthropic',
+            apiKey: 'sk-ant-api03',
+            baseURL: undefined,
+        });
+    });
+
+    it('gemini-* + GEMINI_API_KEY alias → google_ai_studio', () => {
+        process.env.API_LLM_PROVIDER_MODEL = 'gemini-2.5-flash';
+        process.env.GEMINI_API_KEY = 'aiza-gemini-key';
+        expect(resolveEnvProvider()).toEqual({
+            kind: 'gemini_studio',
+            name: 'google_ai_studio',
+            apiKey: 'aiza-gemini-key',
+        });
+    });
+
+    it('API_OPEN_ROUTER_API_KEY automatically sets OpenRouter baseURL', () => {
+        process.env.API_LLM_PROVIDER_MODEL = 'anthropic/claude-3.5-sonnet';
+        process.env.API_OPEN_ROUTER_API_KEY = 'sk-or-v1-abc';
+        expect(resolveEnvProvider()).toEqual({
+            kind: 'openai_compat',
+            name: 'openai_compatible',
+            apiKey: 'sk-or-v1-abc',
+            baseURL: 'https://openrouter.ai/api/v1',
+        });
+    });
+
     it('self-hosted mode with no usable key → null (falls through to cloud default)', () => {
         process.env.API_LLM_PROVIDER_MODEL = 'gemini-2.5-pro';
         expect(resolveEnvProvider()).toBeNull();
+    });
+});
+
+describe('resolveEnvFallbackProvider and resolveEnvFallbackSlot', () => {
+    it('returns null / undefined when API_LLM_FALLBACK_PROVIDER_MODEL is unset or auto', () => {
+        expect(resolveEnvFallbackProvider()).toBeNull();
+        expect(resolveEnvFallbackSlot()).toBeUndefined();
+
+        process.env.API_LLM_FALLBACK_PROVIDER_MODEL = 'auto';
+        expect(resolveEnvFallbackProvider()).toBeNull();
+        expect(resolveEnvFallbackSlot()).toBeUndefined();
+    });
+
+    it('returns undefined if fallback model is identical to primary model', () => {
+        process.env.API_LLM_PROVIDER_MODEL = 'gemini-2.5-flash';
+        process.env.API_LLM_FALLBACK_PROVIDER_MODEL = 'gemini-2.5-flash';
+        process.env.GEMINI_API_KEY = 'aiza-key';
+        expect(resolveEnvFallbackSlot()).toBeUndefined();
+    });
+
+    it('resolves fallback slot for Gemini using GEMINI_API_KEY', () => {
+        process.env.API_LLM_PROVIDER_MODEL = 'claude-3-5-sonnet-20241022';
+        process.env.API_ANTHROPIC_API_KEY = 'sk-ant-key';
+        process.env.API_LLM_FALLBACK_PROVIDER_MODEL = 'gemini-2.5-flash';
+        process.env.GEMINI_API_KEY = 'aiza-key';
+
+        expect(resolveEnvFallbackSlot()).toEqual({
+            provider: BYOKProvider.GOOGLE_GEMINI,
+            apiKey: 'aiza-key',
+            model: 'gemini-2.5-flash',
+        });
+    });
+
+    it('resolves fallback slot for OpenRouter using fallback explicit key', () => {
+        process.env.API_LLM_PROVIDER_MODEL = 'claude-3-5-sonnet-20241022';
+        process.env.API_ANTHROPIC_API_KEY = 'sk-ant-key';
+        process.env.API_LLM_FALLBACK_PROVIDER_MODEL = 'deepseek/deepseek-r1';
+        process.env.API_LLM_FALLBACK_API_KEY = 'sk-or-fallback';
+        process.env.API_LLM_FALLBACK_BASE_URL = 'https://openrouter.ai/api/v1';
+
+        expect(resolveEnvFallbackSlot()).toEqual({
+            provider: BYOKProvider.OPENAI_COMPATIBLE,
+            apiKey: 'sk-or-fallback',
+            model: 'deepseek/deepseek-r1',
+            baseURL: 'https://openrouter.ai/api/v1',
+        });
+    });
+
+    it('attaches fallback slot to managedSlot when fallback is configured', () => {
+        process.env.API_LLM_PROVIDER_MODEL = 'gemini-2.5-pro';
+        process.env.API_GOOGLE_AI_API_KEY = 'studio-key';
+        process.env.API_LLM_FALLBACK_PROVIDER_MODEL = 'gpt-4o-mini';
+        process.env.API_OPEN_AI_API_KEY = 'sk-openai-key';
+
+        const res = resolveManagedSlot('default-model', {});
+        expect(res).toMatchObject({
+            kind: 'slot',
+            slot: {
+                provider: BYOKProvider.GOOGLE_GEMINI,
+                model: 'gemini-2.5-pro',
+                fallback: {
+                    provider: BYOKProvider.OPENAI_COMPATIBLE,
+                    model: 'gpt-4o-mini',
+                },
+            },
+        });
     });
 });
 

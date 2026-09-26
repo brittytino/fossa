@@ -31,6 +31,7 @@ export {
 // back-compat so `@libs/llm/byok-to-vercel` stays the stable import surface.
 export {
     resolveManagedSlot,
+    resolveEnvFallbackSlot,
     // getModelName lives next to the env cascade it mirrors (so a telemetry-only
     // caller doesn't have to pull in the provider REGISTRY this file builds
     // from); re-exported here since `@libs/llm/byok-to-vercel` is its stable
@@ -43,6 +44,17 @@ export {
     FOSSA_TRIAL_MODEL,
     trialDefaultModel,
 } from './byok-defaults';
+
+function isEncryptedApiKey(key?: string): boolean {
+    if (!key || typeof key !== 'string') return false;
+    const parts = key.split(':');
+    return (
+        parts.length === 2 &&
+        parts[0].length === 32 &&
+        /^[0-9a-fA-F]{32}$/.test(parts[0]) &&
+        /^[0-9a-fA-F]+$/.test(parts[1])
+    );
+}
 
 /**
  * Build a Vercel AI SDK LanguageModel from ONE resolved model slot (slice 04b).
@@ -96,7 +108,9 @@ export function buildModelFromSlot(
     // An unknown provider id throws a clear per-provider error (replacing the old
     // switch's silent openai-compatible default) — unreachable for the closed
     // BYOKProvider enum, but fail-loud.
-    const apiKey = decrypt(slot.apiKey);
+    const apiKey = isEncryptedApiKey(slot.apiKey)
+        ? decrypt(slot.apiKey)
+        : slot.apiKey;
     return REGISTRY.get(slot.provider).build(
         { ...slot, apiKey, baseURL: repairBaseUrl(slot.baseURL) },
         options,

@@ -137,12 +137,33 @@ export function resolveEnvProvider(): EnvProviderResolution | null {
 
     const isGemini = GEMINI_MODEL_PATTERN.test(envMode);
     const isClaude = CLAUDE_MODEL_PATTERN.test(envMode);
-    const openaiKey = process.env.API_OPEN_AI_API_KEY;
-    const openaiBaseURL = process.env.API_OPENAI_FORCE_BASE_URL;
+
+    const anthropicKey =
+        process.env.API_ANTHROPIC_API_KEY ||
+        process.env.ANTHROPIC_API_KEY ||
+        process.env.API_OPEN_AI_API_KEY;
+
     const vertexKey = process.env.API_VERTEX_AI_API_KEY;
     const googleAiStudioKey =
         process.env.API_GOOGLE_AI_API_KEY ||
-        process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+        process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+        process.env.GEMINI_API_KEY;
+
+    const openrouterKey =
+        process.env.API_OPEN_ROUTER_API_KEY ||
+        process.env.API_OPENROUTER_API_KEY ||
+        process.env.OPENROUTER_API_KEY;
+
+    const openaiKey =
+        process.env.API_OPEN_AI_API_KEY ||
+        process.env.OPENAI_API_KEY ||
+        openrouterKey;
+
+    let openaiBaseURL = process.env.API_OPENAI_FORCE_BASE_URL;
+    if (!openaiBaseURL && openrouterKey) {
+        openaiBaseURL = 'https://openrouter.ai/api/v1';
+    }
+
     const viaProxy = isProxyBaseURL(openaiBaseURL);
     const vertexLocation = process.env.API_VERTEX_AI_LOCATION;
 
@@ -180,11 +201,11 @@ export function resolveEnvProvider(): EnvProviderResolution | null {
         }
     }
     // Native Anthropic key takes precedence over Claude-on-Vertex.
-    if (isClaude && openaiKey && !viaProxy) {
+    if (isClaude && anthropicKey && !viaProxy) {
         return {
             kind: 'claude_anthropic',
             name: 'anthropic',
-            apiKey: openaiKey,
+            apiKey: anthropicKey,
             baseURL: openaiBaseURL || undefined,
         };
     }
@@ -221,6 +242,138 @@ export function resolveEnvProvider(): EnvProviderResolution | null {
         };
     }
     return null;
+}
+
+/**
+ * Resolve optional fallback LLM provider configured via environment variables.
+ * When primary fails due to rate limits or transient outages, runtime failover
+ * will automatically route requests to this fallback model.
+ */
+export function resolveEnvFallbackProvider(): EnvProviderResolution | null {
+    const fallbackModel = process.env.API_LLM_FALLBACK_PROVIDER_MODEL;
+    if (!fallbackModel || fallbackModel === 'none' || fallbackModel === 'auto') return null;
+
+    const isGemini = GEMINI_MODEL_PATTERN.test(fallbackModel);
+    const isClaude = CLAUDE_MODEL_PATTERN.test(fallbackModel);
+    const fallbackExplicitKey = process.env.API_LLM_FALLBACK_API_KEY;
+    const fallbackBaseURL = process.env.API_LLM_FALLBACK_BASE_URL;
+
+    const anthropicKey =
+        fallbackExplicitKey ||
+        process.env.API_ANTHROPIC_API_KEY ||
+        process.env.ANTHROPIC_API_KEY ||
+        process.env.API_OPEN_AI_API_KEY;
+
+    const googleAiStudioKey =
+        fallbackExplicitKey ||
+        process.env.API_GOOGLE_AI_API_KEY ||
+        process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+        process.env.GEMINI_API_KEY;
+
+    const openrouterKey =
+        fallbackExplicitKey ||
+        process.env.API_OPEN_ROUTER_API_KEY ||
+        process.env.API_OPENROUTER_API_KEY ||
+        process.env.OPENROUTER_API_KEY;
+
+    const openaiKey =
+        fallbackExplicitKey ||
+        process.env.API_OPEN_AI_API_KEY ||
+        process.env.OPENAI_API_KEY ||
+        openrouterKey;
+
+    let effectiveBaseUrl = fallbackBaseURL || process.env.API_OPENAI_FORCE_BASE_URL;
+    if (!effectiveBaseUrl && openrouterKey) {
+        effectiveBaseUrl = 'https://openrouter.ai/api/v1';
+    }
+
+    const viaProxy = isProxyBaseURL(effectiveBaseUrl);
+    const vertexLocation = process.env.API_VERTEX_AI_LOCATION;
+
+    if (isGemini && !viaProxy) {
+        if (googleAiStudioKey) {
+            return {
+                kind: 'gemini_studio',
+                name: 'google_ai_studio',
+                apiKey: googleAiStudioKey,
+            };
+        }
+        if (process.env.API_VERTEX_AI_API_KEY) {
+            return {
+                kind: 'gemini_vertex',
+                name: 'google_vertex',
+                apiKey: process.env.API_VERTEX_AI_API_KEY,
+                vertexLocation,
+            };
+        }
+    }
+
+    if (isClaude && anthropicKey && !viaProxy) {
+        return {
+            kind: 'claude_anthropic',
+            name: 'anthropic',
+            apiKey: anthropicKey,
+            baseURL: effectiveBaseUrl || undefined,
+        };
+    }
+
+    if (openaiKey) {
+        return {
+            kind: 'openai_compat',
+            name: 'openai_compatible',
+            apiKey: openaiKey,
+            baseURL: effectiveBaseUrl || 'https://api.openai.com/v1',
+        };
+    }
+
+    return null;
+}
+
+/**
+ * Resolves the optional fallback model configured via environment variables as a
+ * normalized model slot. Returned slot has no `.fallback` of its own (single-hop invariant).
+ */
+export function resolveEnvFallbackSlot(): Omit<NormalizedModel, 'fallback'> | undefined {
+    const fallback = resolveEnvFallbackProvider();
+    if (!fallback) return undefined;
+    const fallbackModel = process.env.API_LLM_FALLBACK_PROVIDER_MODEL;
+    if (!fallbackModel) return undefined;
+    if (fallbackModel === process.env.API_LLM_PROVIDER_MODEL) {
+        return undefined;
+    }
+
+    switch (fallback.kind) {
+        case 'gemini_studio':
+            return {
+                provider: BYOKProvider.GOOGLE_GEMINI,
+                apiKey: fallback.apiKey,
+                model: fallbackModel,
+            };
+        case 'gemini_vertex':
+        case 'claude_vertex':
+            return {
+                provider: BYOKProvider.GOOGLE_VERTEX,
+                apiKey: fallback.apiKey,
+                model: fallbackModel,
+                vertexLocation: fallback.vertexLocation,
+            };
+        case 'claude_anthropic':
+            return {
+                provider: BYOKProvider.ANTHROPIC,
+                apiKey: fallback.apiKey,
+                model: fallbackModel,
+                baseURL: fallback.baseURL,
+            };
+        case 'openai_compat':
+            return {
+                provider: BYOKProvider.OPENAI_COMPATIBLE,
+                apiKey: fallback.apiKey,
+                model: fallbackModel,
+                baseURL: fallback.baseURL,
+            };
+        default:
+            return undefined;
+    }
 }
 
 /** The env kind → the BYOK provider id its model is built + reasoned under. Same
@@ -281,9 +434,19 @@ function managedSlot(
     model: string,
     extra?: Partial<NormalizedModel>,
 ): ManagedResolution {
+    const fallback = resolveEnvFallbackSlot();
     // MANAGED slot: the env apiKey is PLAINTEXT; buildModelFromSlot must NOT
     // decrypt it (decrypt is only for the ciphertext BYOK slot path).
-    return { kind: 'slot', slot: { provider, apiKey, model, ...extra } };
+    return {
+        kind: 'slot',
+        slot: {
+            provider,
+            apiKey,
+            model,
+            ...(fallback ? { fallback } : {}),
+            ...extra,
+        },
+    };
 }
 
 /**
@@ -492,8 +655,15 @@ export function hasManagedModelKey(): boolean {
             !!vertexProjectFromEnv();
         return !!(
             process.env.API_OPEN_AI_API_KEY ||
+            process.env.OPENAI_API_KEY ||
+            process.env.API_ANTHROPIC_API_KEY ||
+            process.env.ANTHROPIC_API_KEY ||
+            process.env.API_OPEN_ROUTER_API_KEY ||
+            process.env.API_OPENROUTER_API_KEY ||
+            process.env.OPENROUTER_API_KEY ||
             process.env.API_GOOGLE_AI_API_KEY ||
             process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+            process.env.GEMINI_API_KEY ||
             process.env.API_VERTEX_AI_API_KEY ||
             adcBacksModel
         );

@@ -113,9 +113,13 @@
 | `API_TRUST_JSON_SCHEMA_BASE_URLS` | – | string | ⚙️ Both | Comma-separated baseURL substrings trusted for native json_schema structured output on BYOK openai_compatible providers. A capability allowlist: when a BYOK baseURL contains one of these, the code review agent sends response_format=json_schema instead of the slower json_object fallback. Leave empty unless you run a non-vLLM but schema-capable proxy. |
 | `API_LLM_PROVIDER_MODEL` | – | string | ⚙️ Both | Force a specific model. "auto" = router picks per task. |
 | `API_LLM_TEMPERATURE_OVERRIDE` | – | number | ⚙️ Both | Override the temperature for every LLM call (env-mode self-hosted only). Set this if `API_LLM_PROVIDER_MODEL` points at a reasoning/thinking model whose API restricts temperature (Moonshot's `kimi-k2.6` and `kimi-k2-thinking*` only accept temperature=1; OpenAI's o1 family is similar). When unset/empty, Fossa auto-clamps a small list of known reasoning models to 1 and falls through to each prompt's `setTemperature()` for everything else. Consumed by libs/code-review/.../env-llm-config.ts and surfaced in get-llm-config-status so the dashboard can explain why every prompt ignores its hard-coded temperature. |
-| `API_ANTHROPIC_API_KEY` | – | secret | ☁️ Cloud |  |
-| `API_GOOGLE_AI_API_KEY` | – | secret | ☁️ Cloud | Optional secondary providers — appear commented in the installer template. |
-| `GEMINI_API_KEY` | – | secret | ☁️ Cloud |  |
+| `API_ANTHROPIC_API_KEY` | – | secret | ⚙️ Both | Anthropic API key. Used when API_LLM_PROVIDER_MODEL targets a Claude model (e.g. claude-3-5-sonnet). |
+| `API_GOOGLE_AI_API_KEY` | – | secret | ⚙️ Both | Google AI Studio API key. Used when API_LLM_PROVIDER_MODEL targets a Gemini model (e.g. gemini-2.5-flash). |
+| `GEMINI_API_KEY` | – | secret | ⚙️ Both | Alias for Google Gemini API key. |
+| `API_OPEN_ROUTER_API_KEY` | – | secret | ⚙️ Both | OpenRouter API key. Allows routing any model supported by OpenRouter (e.g. anthropic/claude-3.5-sonnet). |
+| `API_LLM_FALLBACK_PROVIDER_MODEL` | – | string | ⚙️ Both | Optional fallback LLM model. Automatically fails over when primary provider encounters rate limits (429) or transient outages (5xx). |
+| `API_LLM_FALLBACK_API_KEY` | – | secret | ⚙️ Both | Optional dedicated API key for the fallback model. |
+| `API_LLM_FALLBACK_BASE_URL` | – | url | ⚙️ Both | Optional dedicated Base URL for the fallback model. |
 | `API_VERTEX_AI_API_KEY` | – | secret | ☁️ Cloud | Service Account JSON (base64-encoded) for Vertex AI. Leave empty to authenticate with Application Default Credentials instead (Workload Identity, an attached service account, or `gcloud auth application-default login`); GOOGLE_CLOUD_PROJECT must then be set. |
 | `GOOGLE_CLOUD_PROJECT` | – | string | ☁️ Cloud | GCP project for Vertex AI when authenticating with Application Default Credentials rather than a service account key. Only needed when API_VERTEX_AI_API_KEY is empty — with a key the project is read from the key itself. GCLOUD_PROJECT is accepted as an alias. |
 | `API_VERTEX_AI_LOCATION` | – | string | ☁️ Cloud |  |

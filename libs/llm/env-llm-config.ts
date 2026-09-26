@@ -14,7 +14,8 @@ export type EnvLLMProviderId =
     | 'openai_compatible'
     | 'anthropic'
     | 'google_gemini'
-    | 'google_vertex';
+    | 'google_vertex'
+    | 'open_router';
 
 export interface EnvLLMDescriptor {
     /** True iff the env configures a usable provider + key pair. */
@@ -26,6 +27,10 @@ export interface EnvLLMDescriptor {
     baseUrl?: string;
     /** `API_VERTEX_AI_LOCATION` when provider resolves to Vertex. */
     vertexLocation?: string;
+    /** Optional fallback model configured via `API_LLM_FALLBACK_PROVIDER_MODEL`. */
+    fallbackModel?: string;
+    /** True iff an env fallback model is configured. */
+    fallbackConfigured?: boolean;
     /**
      * Parsed `API_LLM_TEMPERATURE_OVERRIDE`. Present iff the operator set
      * an explicit numeric override. Surfaced so the dashboard can tell
@@ -88,16 +93,41 @@ export function describeEnvLLMConfig(
         return { configured: false };
     }
 
-    const openaiKey = env.API_OPEN_AI_API_KEY;
-    const openaiBaseURL = env.API_OPENAI_FORCE_BASE_URL;
+    const anthropicKey =
+        env.API_ANTHROPIC_API_KEY ||
+        env.ANTHROPIC_API_KEY ||
+        env.API_OPEN_AI_API_KEY;
+
     const vertexKey = env.API_VERTEX_AI_API_KEY;
     const googleAiStudioKey =
-        env.API_GOOGLE_AI_API_KEY || env.GOOGLE_GENERATIVE_AI_API_KEY;
+        env.API_GOOGLE_AI_API_KEY ||
+        env.GOOGLE_GENERATIVE_AI_API_KEY ||
+        env.GEMINI_API_KEY;
+
+    const openrouterKey =
+        env.API_OPEN_ROUTER_API_KEY ||
+        env.API_OPENROUTER_API_KEY ||
+        env.OPENROUTER_API_KEY;
+
+    const openaiKey =
+        env.API_OPEN_AI_API_KEY ||
+        env.OPENAI_API_KEY ||
+        openrouterKey;
+
+    let openaiBaseURL = env.API_OPENAI_FORCE_BASE_URL;
+    if (!openaiBaseURL && openrouterKey) {
+        openaiBaseURL = 'https://openrouter.ai/api/v1';
+    }
+
     const vertexLocation = env.API_VERTEX_AI_LOCATION || undefined;
     const viaProxy = isProxyBaseURL(openaiBaseURL);
 
     const isGemini = GEMINI_MODEL_PATTERN.test(envMode);
     const isClaude = CLAUDE_MODEL_PATTERN.test(envMode);
+
+    const fallbackModel = env.API_LLM_FALLBACK_PROVIDER_MODEL;
+    const hasFallback =
+        !!fallbackModel && fallbackModel !== 'auto' && fallbackModel !== 'none';
 
     const temperatureOverrideRaw = env.API_LLM_TEMPERATURE_OVERRIDE;
     const temperatureOverrideParsed =
@@ -108,10 +138,17 @@ export function describeEnvLLMConfig(
         ? temperatureOverrideParsed
         : undefined;
 
-    const baseDescriptor = (descriptor: EnvLLMDescriptor): EnvLLMDescriptor =>
-        temperatureOverride !== undefined
-            ? { ...descriptor, temperatureOverride }
-            : descriptor;
+    const baseDescriptor = (descriptor: EnvLLMDescriptor): EnvLLMDescriptor => {
+        const enriched: EnvLLMDescriptor = {
+            ...descriptor,
+            ...(hasFallback
+                ? { fallbackModel, fallbackConfigured: true }
+                : {}),
+        };
+        return temperatureOverride !== undefined
+            ? { ...enriched, temperatureOverride }
+            : enriched;
+    };
 
     if (isGemini && !viaProxy) {
         if (googleAiStudioKey) {
@@ -154,7 +191,7 @@ export function describeEnvLLMConfig(
         }
     }
 
-    if (isClaude && openaiKey && !viaProxy) {
+    if (isClaude && anthropicKey && !viaProxy) {
         return baseDescriptor({
             configured: true,
             model: envMode,
@@ -185,6 +222,15 @@ export function describeEnvLLMConfig(
                 vertexLocation: vertexLocation || 'global',
             });
         }
+    }
+
+    if (openrouterKey || (openaiBaseURL && /openrouter\.ai/i.test(openaiBaseURL))) {
+        return baseDescriptor({
+            configured: true,
+            model: envMode,
+            providerId: 'open_router',
+            baseUrl: openaiBaseURL || 'https://openrouter.ai/api/v1',
+        });
     }
 
     if (openaiKey) {

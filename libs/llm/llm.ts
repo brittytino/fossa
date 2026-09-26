@@ -45,6 +45,7 @@ import {
     runWithModelFailover,
     type FailoverAttemptControl,
 } from '@libs/llm/model-failover';
+import { resolveEnvFallbackSlot } from './managed-slot';
 
 /** The raw AI SDK result an agent-loop call returns (steps / usage / text). */
 export type AgentLoopResult = Awaited<ReturnType<typeof generateText>>;
@@ -175,11 +176,13 @@ export class LLM {
         req: LlmRequest & { schema?: z.ZodType | Schema },
     ): Promise<unknown> {
         // Resolve the routing decision ONCE. The primary slot carries its runtime
-        // fallback in `.fallback` (stamped by resolveTaskSlot), so the cascade is
-        // primary → fallback; a slot without a fallback (or the managed default,
-        // undefined) makes `runWithModelFailover` a single-attempt pass-through.
+        // fallback in `.fallback` (stamped by resolveTaskSlot). When in self-hosted
+        // .env mode (slot is undefined), resolveEnvFallbackSlot checks if an env
+        // fallback (API_LLM_FALLBACK_PROVIDER_MODEL) is configured, enabling
+        // automatic failover on rate-limits (429) or transient provider outages.
         const slot = resolveSlot(req);
-        const attempts = [slot, slot?.fallback];
+        const envFallback = !slot ? resolveEnvFallbackSlot() : undefined;
+        const attempts = [slot, slot?.fallback ?? envFallback];
         const failoverOpts = {
             runName: req.runName,
             organizationId: req.organizationId,

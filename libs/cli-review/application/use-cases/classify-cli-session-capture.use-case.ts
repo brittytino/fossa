@@ -10,6 +10,7 @@ import {
 } from '@libs/cli-review/domain/types/cli-session-capture.types';
 import { PermissionValidationService } from '@libs/shared/infrastructure/permissions';
 import { LLM_TASK } from '@libs/llm/byok-config';
+import { CliSessionCaptureRepository } from '../../infrastructure/repositories/cli-session-capture.repository';
 
 const LLMDecisionSchema = z.object({
     type: z.enum([

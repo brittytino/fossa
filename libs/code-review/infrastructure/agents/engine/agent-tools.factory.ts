@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import { createLogger } from '@libs/core/log/logger';
 import type { LinkedRepoAccess } from '../../../domain/types/linked-repositories.types';
 import { createSubmoduleProbe } from '@libs/code-review/infrastructure/agents/engine/uninitialized-submodules';
+import { RemoteCommands } from '@libs/code-review/infrastructure/adapters/services/collectCrossFileContexts.service';
+import { shSingleQuote } from '@libs/code-review/infrastructure/adapters/services/shell-quote';
 
 const logger = createLogger('AgentTools');
 

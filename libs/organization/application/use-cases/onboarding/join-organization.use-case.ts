@@ -133,7 +133,8 @@ export class JoinOrganizationUseCase implements IUseCase {
                 );
             }
 
-            const requiresEmailConfirmation = environment.API_CLOUD_MODE;
+            const requiresEmailConfirmation =
+                process.env.API_CLOUD_MODE === 'true';
             const updatedUser = await this.userService.update(
                 {
                     uuid: user.uuid,

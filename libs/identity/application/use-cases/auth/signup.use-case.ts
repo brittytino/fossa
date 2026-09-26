@@ -73,7 +73,7 @@ export class SignUpUseCase implements IUseCase {
             }
 
             const status =
-                options?.preVerified || !environment.API_CLOUD_MODE
+                options?.preVerified || process.env.API_CLOUD_MODE !== 'true'
                     ? STATUS.ACTIVE
                     : STATUS.PENDING;
             const user: Omit<IUser, 'uuid'> = {

@@ -57,11 +57,13 @@ describe('SignUpUseCase — user status when joining an existing org', () => {
             deps.telemetry as any,
         );
 
+    let originalCloudMode: string | undefined;
+
     const runWith = async (
         cloudMode: boolean,
         options?: Parameters<SignUpUseCase['execute']>[1],
     ) => {
-        environment.API_CLOUD_MODE = cloudMode;
+        process.env.API_CLOUD_MODE = String(cloudMode);
         const deps = buildDeps();
         await buildUseCase(deps).execute(
             {
@@ -77,11 +79,15 @@ describe('SignUpUseCase — user status when joining an existing org', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
-        originalCloudMode = environment.API_CLOUD_MODE;
+        originalCloudMode = process.env.API_CLOUD_MODE;
     });
 
     afterEach(() => {
-        environment.API_CLOUD_MODE = originalCloudMode;
+        if (originalCloudMode === undefined) {
+            delete process.env.API_CLOUD_MODE;
+        } else {
+            process.env.API_CLOUD_MODE = originalCloudMode;
+        }
     });
 
     describe('with organizationId (auto-join / SSO path)', () => {
@@ -111,7 +117,7 @@ describe('SignUpUseCase — user status when joining an existing org', () => {
         // This branch is the path 1 case — user creates their own org and is
         // always ACTIVE owner. preVerified / cloud mode shouldn't matter here.
         it('always ACTIVE owner regardless of cloud mode', async () => {
-            environment.API_CLOUD_MODE = true;
+            process.env.API_CLOUD_MODE = 'true';
             const deps = buildDeps();
             deps.organizationService.findOne.mockResolvedValue(null);
 
@@ -138,7 +144,7 @@ describe('SignUpUseCase — user status when joining an existing org', () => {
         ) => deps.teamMembersService.create.mock.calls[0][0].status;
 
         it('SSO provisioning (preVerified, non-owner) → membership ACTIVE — even in cloud', async () => {
-            environment.API_CLOUD_MODE = true;
+            process.env.API_CLOUD_MODE = 'true';
             const deps = buildDeps();
             await buildUseCase(deps).execute(
                 {
@@ -153,7 +159,7 @@ describe('SignUpUseCase — user status when joining an existing org', () => {
         });
 
         it('plain non-owner join (no preVerified) → membership INACTIVE — unchanged', async () => {
-            environment.API_CLOUD_MODE = true;
+            process.env.API_CLOUD_MODE = 'true';
             const deps = buildDeps();
             await buildUseCase(deps).execute({
                 email: 'invitee@acme.com',

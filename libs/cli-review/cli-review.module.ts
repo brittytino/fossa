@@ -28,6 +28,7 @@ import { GitHubRateLimitGateService } from '@libs/platform/infrastructure/adapte
 import { RATE_LIMIT_GATE_SERVICE_TOKEN } from '@libs/core/workflow/domain/contracts/rate-limit-gate.service.contract';
 import { GithubModule } from '@libs/platform/modules/github.module';
 import { PlatformCoreModule } from '@libs/platform/modules/platform-core.module';
+import { GlobalCacheModule } from '@libs/core/cache/cache.module';
 
 // Services
 import { CliInputConverter } from './infrastructure/converters/cli-input.converter';

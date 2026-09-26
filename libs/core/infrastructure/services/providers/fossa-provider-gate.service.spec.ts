@@ -62,7 +62,7 @@ describe('FossaProviderGate', () => {
     });
 
     it('is off on a self-hosted install without asking the flag', async () => {
-        (environment as { API_CLOUD_MODE: boolean }).API_CLOUD_MODE = false;
+        process.env.API_CLOUD_MODE = 'false';
         const { gate, isEnabled } = build();
         await expect(gate.isEnabledFor('org-1')).resolves.toBe(false);
         expect(isEnabled).not.toHaveBeenCalled();

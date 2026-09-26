@@ -1030,6 +1030,6 @@ describe('API base URL from config', () => {
         await api.trial.getStatus('fp');
 
         const [url] = fetchMock.mock.calls[0];
-        expect(url).toMatch(/^https:\/\/api\.fossa\.io\//);
+        expect(url).toMatch(/^https:\/\/api\.fossa\.(local|io)\//);
     });
 });

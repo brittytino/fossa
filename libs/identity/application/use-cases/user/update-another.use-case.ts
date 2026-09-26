@@ -7,6 +7,7 @@ import {
     IUsersService,
     USER_SERVICE_TOKEN,
 } from '@libs/identity/domain/user/contracts/user.service.contract';
+import { IUser } from '@libs/identity/domain/user/interfaces/user.interface';
 import {
     IOrganizationService,
     ORGANIZATION_SERVICE_TOKEN,

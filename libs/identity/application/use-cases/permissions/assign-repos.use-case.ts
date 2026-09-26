@@ -1,6 +1,7 @@
 import { createLogger } from '@libs/core/log/logger';
 import { Inject, Injectable } from '@nestjs/common';
 import { REQUEST } from '@nestjs/core';
+import { UserRequest } from '@libs/core/infrastructure/config/types/http/user-request.type';
 
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { IntegrationConfigKey } from '@libs/core/domain/enums/Integration-config-key.enum';

@@ -12,6 +12,7 @@ import { SessionEventRepository } from '@libs/cli-review/infrastructure/reposito
 import { SessionEventModel } from '@libs/cli-review/infrastructure/repositories/schemas/session-event.model';
 import { PermissionValidationService } from '@libs/shared/infrastructure/permissions';
 import { LLM_TASK } from '@libs/llm/byok-config';
+import { OrganizationAndTeamData } from '@libs/core/infrastructure/config/types/general/organizationAndTeamData';
 
 const LLMDecisionSchema = z.object({
     type: z.enum([

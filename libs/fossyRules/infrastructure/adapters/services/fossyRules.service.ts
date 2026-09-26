@@ -10,6 +10,7 @@ import { LLM } from '@libs/llm/llm';
 import { v4 } from 'uuid';
 import bucketsData from '../data/buckets.json';
 import libraryFossyRules from '../data/library-fossy-rules.json';
+import { AuditLogEvents } from '@libs/core/domain/constants/audit-log.events';
 
 import { createLogger } from '@libs/core/log/logger';
 import { CentralizedConfigPrService } from '@libs/centralized-config/infrastructure/adapters/services/centralized-config-pr.service';

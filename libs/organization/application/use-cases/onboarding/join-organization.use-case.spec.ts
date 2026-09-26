@@ -72,17 +72,23 @@ describe('JoinOrganizationUseCase', () => {
         return { user, organization, team };
     };
 
+    let originalCloudMode: string | undefined;
+
     beforeEach(() => {
         jest.clearAllMocks();
-        originalCloudMode = environment.API_CLOUD_MODE;
+        originalCloudMode = process.env.API_CLOUD_MODE;
     });
 
     afterEach(() => {
-        environment.API_CLOUD_MODE = originalCloudMode;
+        if (originalCloudMode === undefined) {
+            delete process.env.API_CLOUD_MODE;
+        } else {
+            process.env.API_CLOUD_MODE = originalCloudMode;
+        }
     });
 
     it('should set user as ACTIVE and skip confirmation email in self-hosted mode', async () => {
-        environment.API_CLOUD_MODE = false;
+        process.env.API_CLOUD_MODE = 'false';
 
         const deps = createDeps();
         const { organization } = setupDefaultFlow(deps);
@@ -122,7 +128,7 @@ describe('JoinOrganizationUseCase', () => {
     });
 
     it('should set user as PENDING_EMAIL and send confirmation email in cloud mode', async () => {
-        environment.API_CLOUD_MODE = true;
+        process.env.API_CLOUD_MODE = 'true';
 
         const deps = createDeps();
         const { organization, team } = setupDefaultFlow(deps);

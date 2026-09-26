@@ -105,6 +105,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     sed -i '' "s|JWT_REFRESH_SECRET=.*|JWT_REFRESH_SECRET=$JWT_REFRESH_SECRET_ESCAPED|" .env
     sed -i '' "s|API_JWT_SECRET=.*|API_JWT_SECRET=$API_JWT_SECRET_ESCAPED|" .env
     sed -i '' "s|API_JWT_REFRESHSECRET=.*|API_JWT_REFRESHSECRET=$API_JWT_REFRESHSECRET_ESCAPED|" .env
+    sed -i '' "s|API_JWT_REFRESH_SECRET=.*|API_JWT_REFRESH_SECRET=$API_JWT_REFRESHSECRET_ESCAPED|" .env
 
     sed -i '' "s|CODE_MANAGEMENT_SECRET=.*|CODE_MANAGEMENT_SECRET=$CODE_MANAGEMENT_SECRET_ESCAPED|" .env
     sed -i '' "s|CODE_MANAGEMENT_WEBHOOK_TOKEN=.*|CODE_MANAGEMENT_WEBHOOK_TOKEN=$CODE_MANAGEMENT_WEBHOOK_TOKEN_ESCAPED|" .env
@@ -115,6 +116,7 @@ else
     sed -i "s|JWT_REFRESH_SECRET=.*|JWT_REFRESH_SECRET=$JWT_REFRESH_SECRET_ESCAPED|" .env
     sed -i "s|API_JWT_SECRET=.*|API_JWT_SECRET=$API_JWT_SECRET_ESCAPED|" .env
     sed -i "s|API_JWT_REFRESHSECRET=.*|API_JWT_REFRESHSECRET=$API_JWT_REFRESHSECRET_ESCAPED|" .env
+    sed -i "s|API_JWT_REFRESH_SECRET=.*|API_JWT_REFRESH_SECRET=$API_JWT_REFRESHSECRET_ESCAPED|" .env
 
     sed -i "s|CODE_MANAGEMENT_SECRET=.*|CODE_MANAGEMENT_SECRET=$CODE_MANAGEMENT_SECRET_ESCAPED|" .env
     sed -i "s|CODE_MANAGEMENT_WEBHOOK_TOKEN=.*|CODE_MANAGEMENT_WEBHOOK_TOKEN=$CODE_MANAGEMENT_WEBHOOK_TOKEN_ESCAPED|" .env
@@ -137,8 +139,10 @@ echo ""
 echo -e "${GREEN}🎉 Setup completed successfully!${NC}"
 echo ""
 echo -e "${BLUE}📋 Next steps:${NC}"
-echo -e "${BLUE}1.${NC} Configure your LLM API keys in the .env file:"
-echo -e "   ${YELLOW}API_OPEN_AI_API_KEY=your_api_key_here${NC}"
+echo -e "${BLUE}1.${NC} Configure your LLM AI model and API keys in the .env file:"
+echo -e "   ${YELLOW}API_LLM_PROVIDER_MODEL=claude-3-5-sonnet-20241022  # or gpt-4o, gemini-2.5-flash, etc.${NC}"
+echo -e "   ${YELLOW}API_ANTHROPIC_API_KEY=your_key_here                # or API_OPEN_AI_API_KEY, GEMINI_API_KEY, etc.${NC}"
+echo -e "   ${YELLOW}# Optional Fallback: API_LLM_FALLBACK_PROVIDER_MODEL=gemini-2.5-flash${NC}"
 echo ""
 echo -e "${BLUE}2.${NC} Start the services:"
 echo -e "   ${YELLOW}pnpm run docker:start${NC}"

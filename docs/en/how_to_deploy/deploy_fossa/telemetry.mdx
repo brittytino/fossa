@@ -137,16 +137,15 @@ other value (including empty) keeps telemetry enabled.
 
 Both ends are open and small enough to read end-to-end:
 
-- **Client** (what runs on your instance): the cron, collector, and HTTP
+- **Client** (what runs on your instance): the collector, telemetry module, and HTTP
   transport live under [`libs/telemetry/`](https://github.com/brittytino/fossa/tree/main/libs/telemetry)
-  and [`apps/worker/src/cron/self-hosted-beacon.cron.ts`](https://github.com/brittytino/fossa/blob/main/apps/worker/src/cron/self-hosted-beacon.cron.ts).
+  and [`libs/telemetry/application/services/heartbeat-collector.service.ts`](https://github.com/brittytino/fossa/blob/main/libs/telemetry/application/services/heartbeat-collector.service.ts).
 - **Server** (what runs at `telemetry.fossa.local`): the entire receiver is
-  ~80 lines of Fastify route + a Postgres upsert. See
-  [brittytino/fossa-beacon](https://github.com/brittytino/fossa-beacon).
+  ~80 lines of Fastify route + a Postgres upsert.
 
 ## Questions
 
 If something here is unclear or you want a field added, removed, or
 documented further, open an issue at
-[brittytino/fossa-beacon](https://github.com/brittytino/fossa-beacon/issues)
+[GitHub Issues](https://github.com/brittytino/fossa/issues)
 or reach out on [Discord](https://discord.gg/TFZBRk9fT6).

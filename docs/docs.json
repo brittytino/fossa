@@ -369,7 +369,7 @@
             },
             {
                 "label": "Docker Setup",
-                "href": "/en/how_to_deploy/deploy_fossa/docker"
+                "href": "/en/how_to_deploy/deploy_fossa/generic_vm"
             }
         ],
         "primary": {
@@ -386,8 +386,16 @@
     },
     "redirects": [
         {
-            "source": "/changelog.xml",
-            "destination": "/changelog/rss.xml"
+            "source": "/en/how_to_deploy/deploy_fossa/docker",
+            "destination": "/en/how_to_deploy/deploy_fossa/generic_vm"
+        },
+        {
+            "source": "/how_to_deploy/deploy_fossa/docker",
+            "destination": "/en/how_to_deploy/deploy_fossa/generic_vm"
+        },
+        {
+            "source": "/changelog/rss.xml",
+            "destination": "/changelog.xml"
         },
         {
             "source": "/how_to_use/en/cli/overview",

@@ -4,11 +4,9 @@ description: "Deploy Fossa on Kubernetes or OpenShift with the official Helm cha
 icon: "dharmachakra"
 ---
 
-Prefer a cluster over a single VM? Fossa ships **Helm charts** for Kubernetes and
-OpenShift in the [fossa-installer](https://github.com/brittytino/fossa-installer)
-repository. This page is the overview — the charts'
-[README](https://github.com/brittytino/fossa-installer/blob/main/charts/README.md)
-is the complete reference (air-gapped installs, ExternalSecrets, operators,
+Prefer a cluster over a single VM? Fossa ships configuration and deployment assets for Kubernetes and
+OpenShift in the [fossa repository](https://github.com/brittytino/fossa). This page is the overview
+for cluster deployments (air-gapped installs, ExternalSecrets, operators,
 observability, and SOC 2-oriented hardening).
 
 ## Requirements
@@ -24,8 +22,8 @@ StatefulSets the chart manages — the equivalent of Docker Compose `USE_LOCAL_D
 One command, no operators:
 
 ```bash
-git clone https://github.com/brittytino/fossa-installer
-cd fossa-installer/charts/fossa
+git clone https://github.com/brittytino/fossa.git
+cd fossa
 helm dependency build
 helm install fossa . -n fossa --create-namespace \
   --set imageTag=<version> \
@@ -82,7 +80,7 @@ Docker Hub `library/*` images, so the bundled `mongo` image may need an override
 - **Health check** — `../../scripts/doctor-k8s.sh -n fossa` inspects workloads, config,
   and the real health endpoints.
 
-<Card title="Full Helm reference" icon="github" href="https://github.com/brittytino/fossa-installer/blob/main/charts/README.md">
+<Card title="Fossa Repository" icon="github" href="https://github.com/brittytino/fossa">
   Data-store operator setup, reusing existing databases, air-gapped installs,
   secrets via ExternalSecrets, observability, and security defaults.
 </Card>

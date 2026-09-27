@@ -52,7 +52,7 @@ A single `POST /v1/heartbeat` once per UTC day, ~700 bytes. Example payload
 }
 ```
 
-The full schema lives in the [fossa-beacon repository](https://github.com/brittytino/fossa-beacon/blob/main/docs/api.md) — it is enforced server-side
+The full schema lives in the [fossa repository](https://github.com/brittytino/fossa/tree/main/libs/telemetry) — it is enforced server-side
 with a strict validator that rejects any unknown field with a `400`.
 
 ## What we never send
@@ -118,8 +118,7 @@ other value (including empty) keeps telemetry enabled.
 ## Where the data lives
 
 - **Receiver:** a small Node.js service (Fastify) deployed at
-  `telemetry.fossa.local`. Source code is public:
-  [brittytino/fossa-beacon](https://github.com/brittytino/fossa-beacon).
+  `telemetry.fossa.local`.
 - **Storage:** Neon Postgres, US region, encrypted at rest, TLS-only.
   Two tables — `telemetry_instances` (one row per instance, last seen
   + version) and `telemetry_heartbeats` (one row per instance per UTC
